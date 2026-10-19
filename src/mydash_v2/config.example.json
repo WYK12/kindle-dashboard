@@ -1,0 +1,10 @@
+{
+  "city": {
+    "name": "南京",
+    "latitude": 32.06,
+    "longitude": 118.79
+  },
+  "refresh_minutes": 30,
+  "keep_awake": true,
+  "feeds": []
+}

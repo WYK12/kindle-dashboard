@@ -1,0 +1,20 @@
+local U=require('util');local M=require('markets')
+for _,name in ipairs({'home','markets','market_network'}) do assert(loadfile(U.root..'/'..name..'.lua')) end
+assert(M.normalize('sh600519')=='sh600519');assert(M.normalize('000001')=='sz000001')
+assert(M.normalize('518880')=='sh518880');assert(M.normalize('XAU')=='XAU')
+assert(not M.normalize('sh600519;rm'));assert(not M.normalize('hk00700'))
+local f={};for i=1,65 do f[i]='' end
+f[2]=string.char(187,166,201,238)..'300';f[3]='000300';f[4]='110';f[5]='100';f[31]='20261016150000';f[62]='ZS'
+local q=assert(M.tencent('v_sh000300="'..table.concat(f,'~')..'";','sh000300',os.time()))
+assert(q.price==110 and math.abs(q.percent-10)<0.00001 and q.change==10 and q.unit=='点' and q.name=='沪深300')
+assert(M.decode_gbk(string.char(201,207,214,164,214,184,202,253))=='上证指数')
+assert(not M.tencent('v_sh000300="bad";','sh000300',os.time()))
+assert(not M.tencent('v_sh000300="'..table.concat(f,'~')..'";','sh000001',os.time()))
+local g=assert(M.gold({symbol='XAU',price=4000,currency='USD',updatedAt='2026-10-18T13:00:00Z'},'XAU',os.time()))
+assert(os.date('!%Y-%m-%dT%H:%M:%SZ',g.quote_at)=='2026-10-18T13:00:00Z')
+assert(g.percent==nil and g.unit=='美元/盎司')
+assert(not M.gold({symbol='XAU',price=-1,currency='USD',updatedAt='bad'},'XAU',os.time()))
+assert(not M.gold({symbol='XAG',price=4000,currency='USD',updatedAt='2026-10-18T13:00:00Z'},'XAU',os.time()))
+assert(M.state(q,q.quote_at+3600,5)=='历史快照')
+q.error='offline';assert(M.state(q,os.time(),5)=='更新失败·缓存')
+print('MARKET_SELFTEST_OK: symbols, quote fields, percent, units, UTC, stale/error states, invalid data')

@@ -1,0 +1,12 @@
+local U=require('util')
+for _,name in ipairs({'util','render','network','home'}) do assert(loadfile(U.root..'/'..name..'.lua')) end
+assert(U.plain('<p>南京 &amp; 阅读 &#x4E2D;&#25991;</p>')=='南京 & 阅读 中文')
+local rss=U.feed('<rss><item><title><![CDATA[标题]]></title><link>https://example.com</link><description><![CDATA[<p>正文 &amp; 内容</p>]]></description></item></rss>','test')
+assert(#rss==1 and rss[1].title=='标题' and rss[1].body=='正文 & 内容')
+local atom=U.feed('<feed><entry><title>Atom</title><link href="https://example.com/a"/><summary>Hello</summary></entry></feed>','test')
+assert(#atom==1 and atom[1].link=='https://example.com/a' and atom[1].body=='Hello')
+assert(not U.validurl('file:///etc/passwd'));assert(not U.validurl('https://example.com\nfoo'))
+assert(U.validurl('https://example.com/feed?x=1&y=2'))
+assert(U.short('南京天气',3)=='南京…')
+assert(U.quote("a'b")=="'a'\\''b'")
+print('SELFTEST_OK: syntax, RSS, Atom, entities, URL validation, UTF-8, shell quoting')

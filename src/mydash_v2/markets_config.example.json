@@ -1,0 +1,17 @@
+{
+  "interval": 5,
+  "watchlist": [
+    {
+      "symbol": "SGE_AU9999",
+      "name": "国内黄金 Au99.99"
+    },
+    {
+      "symbol": "sh000001",
+      "name": "上证指数"
+    },
+    {
+      "symbol": "usIXIC",
+      "name": "纳斯达克综合指数"
+    }
+  ]
+}

@@ -1,0 +1,618 @@
+local P=require('pinyin')
+local U=require('util');local R=require('render');local ffi=require('ffi');local M=require('markets');local A=require('article');local N=require('news');local C=require('calendar');local L=require('reading')
+ffi.cdef[[
+struct input_event { long sec; long usec; unsigned short type; unsigned short code; int value; };
+int open(const char*,int,...); int read(int,void*,unsigned int); int close(int);
+int ioctl(int,unsigned long,...); int usleep(unsigned int); int getpid(void);
+
+struct input_absinfo { int value,minimum,maximum,fuzz,flat,resolution; };
+]]
+local cfg=U.config();local page='home';local running=true;local fd=-1;local grabbed=false
+local todos=U.load(U.root..'/todos.json',{});local rss={items={}};local weather={};local status={}
+local notice='';local listpage=1;local selected=nil;local draft='';local inputkind='';local keyboardUpper=false
+local articleRequest='';local articleStarted=0;local articleError=''
+local hourpage=1
+local hotBoard='all';local nextHot=0
+local keyboardPinyin=false;local candidatePage=1;local homeClockDirty=false;local lastHomeDate=''
+local cityresults={};local lastCities='';local lastMinute='';local asleep=false;local nextPower=0;local nextNetwork=0;local lastCache='';local redraw=true;local full=true
+local marketcfg=M.config();local marketcache=U.load(U.root..'/cache/markets.json',{quotes={}});local nextMarket=0;local lastMarket='';local marketpage=1
+local keyboardDirty=false;local keyboardCaseDirty=false;local keyboardNotice='';local nextActivity=0;local nextCache=0
+local stockquery='';local stockresults={};local stockrequest='';local stockpending=false;local stockStarted=0;local stockresultpage=1;local stockerror=''
+local ev=ffi.new('struct input_event[1]');local size=ffi.sizeof(ev[0]);assert(size==16,'仅支持 ARMv7 32 位 input_event')
+local ts=ffi.new('struct timespec[1]')
+local function monotonic() ffi.C.clock_gettime(1,ts);return tonumber(ts[0].tv_sec)+tonumber(ts[0].tv_nsec)/1e9 end
+local weekday={'日','一','二','三','四','五','六'}
+local cities={{name='南京',latitude=32.06,longitude=118.79},{name='北京',latitude=39.90,longitude=116.41},{name='上海',latitude=31.23,longitude=121.47},{name='杭州',latitude=30.27,longitude=120.15},{name='苏州',latitude=31.30,longitude=120.58},{name='广州',latitude=23.13,longitude=113.26},{name='深圳',latitude=22.54,longitude=114.06},{name='成都',latitude=30.57,longitude=104.07},{name='武汉',latitude=30.59,longitude=114.31},{name='香港',latitude=22.32,longitude=114.17}}
+local function readcache()
+ weather=U.load(U.root..'/cache/weather.json',{});rss=N.replace(rss,U.load(U.root..'/cache/hotspots.json',{items={}}));status=U.load(U.root..'/cache/status.json',{})
+end
+local function lipc(prop) return U.capture('lipc-get-prop com.lab126.powerd '..prop) end
+local function network(mode,text)
+ local command='/bin/sh '..U.quote(U.root..'/fetch.sh')..' '..U.quote(mode or 'update')..' '..U.quote(text or '')..' >/dev/null 2>&1 &'
+ os.execute(command);if page~='keyboard' then notice='正在后台更新';redraw=true end
+end
+local function savecfg() assert(U.save(U.root..'/config.json',cfg));nextNetwork=0 end
+local function native(mode,value)
+ return U.exec('/bin/sh '..U.quote(U.root..'/native_ui.sh')..' '..U.quote(mode)..' '..U.quote(value or '')..' >>'..U.quote(U.root..'/app.log')..' 2>&1')
+end
+local function release(keepNative)
+ if not keepNative then native('show') end
+ if fd>=0 then if grabbed then ffi.C.ioctl(fd,0x40044590,ffi.cast('int',0)) end ffi.C.close(fd) end fd=-1;grabbed=false
+end
+local function acquire()
+ fd=ffi.C.open('/dev/input/event1',2048);assert(fd>=0,'无法打开触摸设备')
+ if ffi.C.ioctl(fd,0x40044590,ffi.cast('int',1))~=0 then release();error('触摸设备正在被其他应用使用；首页未启动') end
+ grabbed=true
+ assert(native('hide'),'无法隐藏原生顶部栏，请查看 app.log')
+ if not native('awake',cfg.keep_awake==false and '0' or '1') then notice='常显设置失败，请查看 app.log' end
+end
+local function coordinates()
+ local a=ffi.new('struct input_absinfo[1]');local b=ffi.new('struct input_absinfo[1]')
+ local ax=ffi.C.ioctl(fd,0x80184575,a)==0;local ay=ffi.C.ioctl(fd,0x80184576,b)==0
+ return ax and tonumber(a[0].value) or nil,ay and tonumber(b[0].value) or nil
+end
+local function quit(action)
+ local label=({bookstore='正在打开书库',reader='正在打开书籍',readarticle='正在打开文章',browser='正在打开浏览器'})[action]
+ if label then R.begin('',nil,true);R.text(label,48,430,44,976,100);R.finish(false) end
+ U.write(U.root..'/next_action',action or 'native');running=false
+end
+local function launchArticle(id)
+ assert(id:match('^%x+$') and #id==24,'Invalid article id')
+ U.write(U.root..'/reader_id',id)
+ U.save(U.root..'/cache/reader-resume.json',{listpage=listpage,board=hotBoard})
+ quit('readarticle')
+end
+local function openArticle(item)
+ selected=item;articleError='';notice=''
+ if item.content_kind=='hot_summary' then page='hotdetail';redraw=true;full=true;return end
+ local id=A.id(item);local meta=U.load('/mnt/us/RSS/'..id..'.json',{})
+ if meta.link==item.link and meta.status and U.read('/mnt/us/RSS/'..id..'.epub') then launchArticle(id);return end
+ local book=A.feed_book(item)
+ if book and U.write('/mnt/us/RSS/'..id..'.epub',book) and U.save('/mnt/us/RSS/'..id..'.json',{link=item.link,title=item.title,source=item.source,status='feed',time=os.time()}) then launchArticle(id);return end
+ articleRequest=tostring(ffi.C.getpid())..'-'..tostring(math.floor(monotonic()*1000));articleStarted=os.time()
+ assert(U.save(U.root..'/cache/article-request.'..articleRequest..'.json',item))
+ os.execute('/bin/sh '..U.quote(U.root..'/article_fetch.sh')..' '..U.quote(articleRequest)..' >/dev/null 2>&1 &')
+ page='preparearticle';redraw=true;full=true
+end
+local batteryCache;local batteryExpires=0
+local function battery()if os.time()>=batteryExpires then local n=tonumber(lipc('battLevel'));batteryCache=n and (n..'%') or '--';batteryExpires=os.time()+30 end;return batteryCache end
+local function wname(code)
+ code=tonumber(code) or -1
+ if code==0 then return '晴' elseif code<=3 and code>=0 then return '多云' elseif code==45 or code==48 then return '雾' elseif code>=51 and code<=67 then return '雨' elseif code>=71 and code<=77 then return '雪' elseif code>=80 and code<=82 then return '阵雨' elseif code>=85 and code<=86 then return '阵雪' elseif code>=95 then return '雷雨' end return '天气'
+end
+local function value(n,suffix)
+ if type(n)~='number' then return '--' end
+ return string.format('%.0f',n)..(suffix or '')
+end
+local function weatherupdated()
+ return weather.time and ('更新 '..os.date('%m-%d %H:%M',weather.time)..'  ·  Open-Meteo') or '暂无天气缓存'
+end
+local function weatherupdate()network('weather')end
+local function weatherline()
+ if weather.city~=cfg.city.name or not weather.data then return cfg.city.name..'  尚无天气缓存' end
+ local c=weather.data.current;return weather.city..'  '..tostring(c.temperature_2m)..'°C  '..wname(c.weather_code)
+end
+local function footer()
+ local quiet=page=='home' and (notice=='更新完成' or notice=='行情已更新' or notice=='正在后台更新' or notice=='正在更新行情')
+ if notice~='' and not quiet then R.text(U.short(notice,30),48,page=='home' and 1290 or 1382,32,976,page=='home' and 44 or 60,'bold') end
+ if page=='home' then
+  local path=L.last()
+  local defs={{'书库','bookstore'},{'继续阅读',function()
+   if not L.valid(path) then quit('bookstore');return end
+   assert(U.write(U.root..'/reader_book',path));quit('reader')
+  end},{'浏览器','browser'},{'待办','todos'},{'设置','settings'}}
+  local x=80
+  for _,b in ipairs(defs) do
+   local width=#U.utf8(b[1])*40
+   R.text(b[1],x,1351,40,width+12,64,'bold')
+   R.hitbox(x-32,1332,width+64,94,b[2])
+   x=x+width+98
+  end
+ end
+end
+local function nav() page='home';notice='';redraw=true;full=true end
+local function input(kind,value) inputkind=kind;draft=value or '';keyboardPinyin=kind~='feed';keyboardUpper=false;candidatePage=1;keyboardDirty=false;page='keyboard';redraw=true end
+local function marketupdate()
+ os.execute('/bin/sh '..U.quote(U.root..'/market_fetch.sh')..' >/dev/null 2>&1 &');if page~='keyboard' then notice='正在更新行情';redraw=true end
+end
+local function savemarkets(orderOnly) assert(U.save(U.root..'/markets_config.json',marketcfg));if not orderOnly then nextMarket=0 end;redraw=true end
+local function addmarket(symbol,name)
+ for _,v in ipairs(marketcfg.watchlist) do if v.symbol==symbol then notice='已在自选中';return false end end
+ if #marketcfg.watchlist>=12 then notice='最多添加 12 个品种';return false end
+ marketcfg.watchlist[#marketcfg.watchlist+1]={symbol=symbol,name=name};savemarkets();return true
+end
+local function searchstocks(query)
+ if stockrequest~='' then os.remove(U.root..'/cache/search-result.'..stockrequest..'.json') end
+ stockquery=query;stockresults={};stockerror='';stockresultpage=1;stockpending=true;stockStarted=os.time()
+ stockrequest=tostring(ffi.C.getpid())..'-'..tostring(math.floor(monotonic()*1000))
+ os.execute('/bin/sh '..U.quote(U.root..'/search.sh')..' '..U.quote(query)..' '..U.quote(stockrequest)..' >/dev/null 2>&1 &')
+ page='stockresults';redraw=true
+end
+local function inputtext()
+ local chars=U.utf8(draft);return (#chars>120 and ('…'..table.concat(chars,'',#chars-118,#chars)) or draft)..'|'
+end
+local function keyboardLabel() return keyboardPinyin and '拼音' or keyboardUpper and 'ABC' or 'abc' end
+local function candidates(register)
+ R.rect(48,520,976,78,false)
+ local words=keyboardPinyin and P.lookup(draft) or {}
+ candidatePage=math.max(1,math.min(candidatePage,math.max(1,math.ceil(#words/4))))
+ for i=1,6 do
+  local x=48+(i-1)*164;local index=i
+  local text=i<=4 and (words[(candidatePage-1)*4+i] or '') or i==5 and (candidatePage>1 and '上组' or '') or (candidatePage*4<#words and '下组' or '')
+  if keyboardPinyin then R.text(U.short(text,5),x+8,538,30,148,48,'medium') end
+  if register then R.hitbox(x,520,156,78,function()
+   if not keyboardPinyin then return end
+   if index<=4 then draft=P.choose(draft,(candidatePage-1)*4+index);candidatePage=1
+   elseif index==5 then candidatePage=math.max(1,candidatePage-1)
+   else candidatePage=candidatePage+1 end
+   keyboardDirty=true
+  end) end
+ end
+end
+local function drawInput()
+ local height=240;local clearNotice=keyboardNotice~=notice
+ R.partial();R.rect(48,195,976,height,false);R.text(inputtext(),48,195,35,976,height)
+ candidates(false)
+ if keyboardCaseDirty then
+  R.rect(51,1173,214,94,false);R.text(keyboardLabel(),68,1196,36,180,58)
+  R.rect(48,470,976,45,false);if keyboardPinyin then R.text('输入拼音，点选汉字',48,470,28,976,45,'medium') end
+ end
+ if clearNotice then R.rect(48,1382,976,60,false);footer() end
+ R.finish(false,{top=195,left=48,width=976,height=clearNotice and 1247 or keyboardCaseDirty and 1075 or 404})
+ keyboardDirty=false;keyboardCaseDirty=false;keyboardNotice=notice
+end
+local function wrapped(s,limit)
+ local out={};local row='';local n=0
+ for _,c in ipairs(U.utf8(s)) do local w=#c>1 and 2 or 1;if n+w>limit or c=='\n' then out[#out+1]=row;row='';n=0 end;if c~='\n' then row=row..c;n=n+w end end
+ if row~='' then out[#out+1]=row end return out
+end
+local function drawSettings()
+  R.begin('设置',nav,true)
+  local function row(label,value,y,act)
+   R.text(label,48,y,30,500,50,'medium')
+   R.text(value,650,y,28,374,48,'medium')
+   R.rect(48,y+76,976,2,true);R.hitbox(48,y-12,976,100,act)
+  end
+  row('城市',cfg.city.name,169,'cities')
+  row('热点榜单','虎嗅 · 澎湃',281,'rss')
+  row('天气更新间隔',cfg.refresh_minutes..' 分钟',393,function()local values={[30]=60,[60]=180,[180]=30};cfg.refresh_minutes=values[cfg.refresh_minutes] or 60;savecfg();redraw=true end)
+  local enabled=not U.read(U.root..'/DISABLE_AUTOSTART') and U.read('/mnt/us/emergency.sh')
+  row('开机自启',enabled and '开启' or '关闭',505,function()
+   if enabled then U.write(U.root..'/DISABLE_AUTOSTART','disabled\n');notice='已关闭自启'
+   else if U.exec('/bin/sh '..U.quote(U.root..'/autostart.sh')..' enable >>'..U.quote(U.root..'/app.log')..' 2>&1') then notice='已开启自启' else notice='自启入口被占用，请查看 app.log' end end;redraw=true
+  end)
+  row('首页常显',cfg.keep_awake==false and '关闭' or '开启',617,function()
+   local enabled=cfg.keep_awake==false
+   if native('awake',enabled and '1' or '0') then cfg.keep_awake=enabled;savecfg();notice=enabled and '首页常显已开启' or '已恢复自动休眠'
+   else notice='常显设置失败，请查看 app.log' end;redraw=true
+  end)
+  local light=tonumber(lipc('flIntensity')) or 0
+  R.text('前光',48,744,32,500,50)
+  R.text(tostring(light)..' / 24',650,746,28,374,48,'medium')
+  R.compact('减亮',48,822,474,66,function()U.exec('lipc-set-prop com.lab126.powerd flIntensity '..math.max(0,light-2));redraw=true end)
+  R.compact('增亮',550,822,474,66,function()U.exec('lipc-set-prop com.lab126.powerd flIntensity '..math.min(24,light+2));redraw=true end)
+  R.rect(48,930,976,2,true)
+  R.compact('清除残影',48,972,474,66,'refresh')
+  R.compact('休眠',550,972,474,66,function()
+   if not native('awake','0') then notice='无法恢复休眠，请查看 app.log';redraw=true;return end
+   release();asleep=true;nextPower=os.time()+2
+   U.exec('lipc-set-prop com.lab126.powerd powerButton 1');redraw=false
+  end)
+  R.compact('原生首页',48,1208,976,66,'native')
+
+end
+local function draw()
+ if page=='home' then
+  lastHomeDate=os.date('%Y-%m-%d')
+  local function text(s,x,y,size,w,h,bold) R.text(s,x,y,size,w,h,bold and 'bold' or 'medium') end
+  local pending=0;for _,v in ipairs(todos) do if not v.done then pending=pending+1 end end
+  R.begin('',nil,true)
+  text(os.date('%Y年%m月%d日')..'  周'..weekday[tonumber(os.date('%w'))+1],48,28,34,720,54,true)
+  R.hitbox(32,12,736,78,function()C.open();page='calendar';redraw=true end)
+  text('电量 '..battery(),800,28,34,224,54,true)
+  text(os.date('%H:%M'),48,128,118,475,160,true)
+  text('待办  '..pending,52,310,34,220,54,true)
+  R.hitbox(48,298,240,76,'todos')
+  text('刷新',366,310,34,150,54,true)
+  R.hitbox(340,298,180,76,'refresh')
+  R.rect(554,130,3,250,true)
+  local data=weather.city==cfg.city.name and weather.data or nil
+  local c=data and data.current;local d=data and data.daily
+  text(cfg.city.name..'  '..(c and wname(c.weather_code) or '天气'),600,126,36,424,58,true)
+  text(c and (value(c.temperature_2m)..'°C') or '--°C',598,194,72,426,94,true)
+  local range=d and (value((d.temperature_2m_min or {})[1])..' ~ '..value((d.temperature_2m_max or {})[1])..'°C') or '-- ~ --°C'
+  text(range,600,294,32,290,50,true)
+  text('预报',900,294,32,124,50,true)
+  text(weather.time and os.date('%m-%d %H:%M',weather.time) or '尚未更新',600,348,32,424,50,true)
+  R.hitbox(576,116,448,290,'weather')
+  R.rect(48,414,976,2,true)
+  text('自选行情',48,438,40,500,60,true)
+  text('全部',900,442,34,124,54,true)
+  text('品种',48,510,32,292,50,true)
+  text('报价',366,510,32,310,50,true)
+  text('涨跌',692,510,32,178,50,true)
+  text('数据时间',884,510,32,140,50,true)
+  local shortnames={SGE_AU9999='国内黄金',usIXIC='纳斯达克综合'}
+  local count=math.min(6,#marketcfg.watchlist)
+  for i=1,count do
+   local item=marketcfg.watchlist[i];local q=(marketcache.quotes or {})[item.symbol];local y=574+(i-1)*78
+   text(U.short(shortnames[item.symbol] or item.name or item.symbol,7),48,y,40,292,64,true)
+   local price=q and string.format('%.2f',q.price) or '--'
+   if q then
+    if item.symbol=='SGE_AU9999' then price='¥'..price..'/g'
+    elseif item.symbol=='XAU' or item.symbol=='XAG' then price='$'..price..'/oz'
+    elseif q.unit=='点' then price=price..'点' end
+   end
+   text(price,366,y-2,42,310,66,true)
+   text(q and q.percent and string.format('%+.2f%%',q.percent) or '—',692,y+4,36,178,58,true)
+   local when=q and (q.quote_date and q.quote_date:sub(6) or (q.quote_at and os.date('%m-%d',q.quote_at))) or '--'
+   text(when,884,y-1,32,140,40,true)
+   if q and not q.quote_date and q.quote_at then text(os.date('%H:%M',q.quote_at),884,y+35,32,140,40,true) end
+  end
+  if count==0 then text('添加自选',48,600,40,976,70,true) end
+  R.hitbox(48,430,976,626,'markets')
+  R.rect(48,1060,976,2,true)
+  local item=(rss.items or {})[rss.home_index or 1]
+  text('热点',48,1080,40,160,60,true)
+  if item then text('综合 · '..N.label(item),228,1084,32,640,54,true) end
+  text('全部',900,1084,34,124,54,true)
+  R.hitbox(48,1072,976,66,'rss')
+  if item then
+   text(U.short(item.title,40),48,1138,40,976,120,true)
+   R.hitbox(48,1138,976,120,function()openArticle(item)end)
+  else
+   text('暂无热点，点击更新',48,1138,40,976,120,true)
+   R.hitbox(48,1138,976,120,'rss')
+  end
+  R.rect(48,1280,976,2,true)
+
+ elseif page=='calendar' then
+  lastHomeDate=os.date('%Y-%m-%d')
+  C.draw(nav,function()redraw=true end)
+ elseif page=='markets' then
+  local pages=math.max(1,math.ceil(#marketcfg.watchlist/6));marketpage=math.max(1,math.min(marketpage,pages))
+  R.begin('行情看板',nav);local first=(marketpage-1)*6+1;local now=os.time()
+  R.text('品种',48,160,34,350,50,'heavy');R.text('最新',424,160,34,270,50,'heavy');R.text('涨跌幅',756,160,34,268,50,'heavy')
+  R.rect(48,211,976,3,true)
+  if #marketcfg.watchlist==0 then R.text('还没有自选品种，点击下方“自选”添加',48,260,36,976,130) end
+  for i=first,math.min(first+5,#marketcfg.watchlist) do
+   local item=marketcfg.watchlist[i];local q=(marketcache.quotes or {})[item.symbol];local y=224+(i-first)*140
+   R.text(U.short((q and q.name) or item.name or item.symbol,11),48,y,34,350,56,'heavy')
+   R.text(q and string.format('%.2f',q.price) or '--',424,y-2,44,300,62,'heavy')
+   local change=q and q.percent and string.format('%s %+.2f%%',q.percent>0 and '↑' or q.percent<0 and '↓' or '—',q.percent) or '--'
+   R.text(change,756,y+2,36,268,56,'heavy')
+   local time=q and (q.quote_date and (q.quote_date..'（日期）') or (q.quote_at and os.date('%m-%d %H:%M',q.quote_at))) or '暂无报价'
+   local detail=(q and q.unit or item.symbol)..'  ·  '..(q and q.source or '数据源')..'  ·  '..time..'  ·  '..M.state(q,now,marketcfg.interval)
+   R.text(detail,48,y+65,30,976,48,'heavy')
+   R.rect(48,y+127,976,2,true)
+  end
+  R.text('第 '..marketpage..' / '..pages..' 页  ·  '..#marketcfg.watchlist..' 个自选',48,1080,32,976,50,'heavy')
+  R.compact('上一页',48,1140,220,66,function()marketpage=math.max(1,marketpage-1);redraw=true end)
+  R.compact('下一页',284,1140,220,66,function()marketpage=math.min(pages,marketpage+1);redraw=true end)
+  R.compact('更新',520,1140,220,66,marketupdate)
+  R.compact('自选',756,1140,268,66,function()page='marketlist';listpage=1;redraw=true end)
+  R.text((marketcache.time and ('获取 '..os.date('%m-%d %H:%M',marketcache.time)) or '尚未获取')..'  ·  每 '..marketcfg.interval..' 分钟更新',48,1260,32,976,50,'heavy')
+ elseif page=='marketlist' then
+  R.begin('管理自选',function()page='markets';redraw=true end);local first=(listpage-1)*6+1
+  for i=first,math.min(first+5,#marketcfg.watchlist) do local item=marketcfg.watchlist[i];local q=(marketcache.quotes or {})[item.symbol];local y=174+(i-first)*145
+   R.text(U.short((q and q.name) or item.name or item.symbol,13),48,y+8,32,500,54)
+   R.text(item.symbol,48,y+66,26,500,42)
+   if i>1 then R.compact('上移',576,y+10,140,82,function()local target=M.move(marketcfg.watchlist,i,-1);if target then listpage=math.ceil(target/6);savemarkets(true) end end)
+   else R.text('最前',594,y+32,30,104,44) end
+   if i<#marketcfg.watchlist then R.compact('下移',728,y+10,140,82,function()local target=M.move(marketcfg.watchlist,i,1);if target then listpage=math.ceil(target/6);savemarkets(true) end end)
+   else R.text('最后',746,y+32,30,104,44) end
+   R.compact('移除',880,y+10,144,82,function()table.remove(marketcfg.watchlist,i);savemarkets();listpage=math.min(listpage,math.max(1,math.ceil(#marketcfg.watchlist/6)));marketpage=1 end)
+   R.rect(48,y+130,976,2,true)
+  end
+  R.button('上一页',48,1095,220,100,function()listpage=math.max(1,listpage-1);redraw=true end)
+  R.button('下一页',284,1095,220,100,function()listpage=math.min(math.max(1,math.ceil(#marketcfg.watchlist/6)),listpage+1);redraw=true end)
+  R.button('添加品种',520,1095,504,100,function()page='marketadd';redraw=true end)
+  R.button('刷新间隔：'..marketcfg.interval..' 分钟',48,1230,976,90,function()local values={[5]=15,[15]=30,[30]=5};marketcfg.interval=values[marketcfg.interval] or 5;savemarkets() end)
+ elseif page=='marketadd' then
+  R.begin('添加行情品种',function()page='marketlist';redraw=true end)
+  for i,item in ipairs(M.presets) do R.button(item.name,48+((i-1)%2)*502,174+math.floor((i-1)/2)*155,474,125,function()if addmarket(item.symbol,item.name) then page='marketlist' end;redraw=true end) end
+  R.button('搜索名称 / 拼音 / 代码',48,1050,976,110,function()input('market')end)
+ elseif page=='stockresults' then
+  R.begin('选择搜索结果',function()input('market',stockquery)end)
+  R.text('搜索：'..U.short(stockquery,38),48,155,28,976,50)
+  if stockpending then R.text('正在搜索…',48,270,38,976,80)
+  elseif #stockresults==0 then R.text(stockerror~='' and stockerror or '没有匹配结果，请换个拼音或代码',48,270,34,976,130)
+  else
+   local first=(stockresultpage-1)*6+1
+   for i=first,math.min(first+5,#stockresults) do local item=stockresults[i]
+    R.button(U.short(item.name,18)..'  '..item.symbol,48,220+(i-first)*140,976,115,function()
+     if addmarket(item.symbol,item.name) then listpage=math.max(1,math.ceil(#marketcfg.watchlist/6));page='marketlist';notice='已添加 '..item.name end;redraw=true
+    end)
+   end
+  end
+  R.button('上一页',48,1140,300,100,function()stockresultpage=math.max(1,stockresultpage-1);redraw=true end)
+  R.button('下一页',374,1140,300,100,function()stockresultpage=math.min(math.max(1,math.ceil(#stockresults/6)),stockresultpage+1);redraw=true end)
+  R.button('修改搜索',700,1140,324,100,function()input('market',stockquery)end)
+  if stockerror~='' and #stockresults>0 then R.text('网络搜索失败，显示本地匹配',48,1260,27,976,50) end
+ elseif page=='weather' then
+  R.begin('天气',nav)
+  local function text(s,x,y,size,w,h,bold) R.text(s,x,y,size,w,h,'heavy') end
+  local data=weather.city==cfg.city.name and weather.data or nil
+  local c=data and data.current;local d=data and data.daily or {};local h=data and data.hourly or {}
+  text(cfg.city.name,48,158,40,450,60,true)
+  text(c and (value(c.temperature_2m)..'°C') or '--°C',48,224,106,520,142,true)
+  text(c and wname(c.weather_code) or '暂无天气',600,209,42,424,64)
+  text(value((d.temperature_2m_min or {})[1])..' ~ '..value((d.temperature_2m_max or {})[1])..'°C',600,283,36,424,56)
+  text('湿度 '..value(c and c.relative_humidity_2m,'%'),600,344,34,424,54)
+  text(weatherupdated(),48,410,30,976,48)
+  R.rect(48,480,976,2,true)
+  text('未来 3 天',48,505,36,976,56,true)
+  for i=1,3 do
+   local x=48+(i-1)*334;local date=(d.time or {})[i]
+   if i>1 then R.rect(x-18,568,2,222,true) end
+   text(date and (i==1 and '今天' or date:sub(6):gsub('%-','/')) or '--',x,568,34,306,54)
+   text(date and wname((d.weather_code or {})[i]) or '--',x,626,36,306,56)
+   text(value((d.temperature_2m_min or {})[i])..' / '..value((d.temperature_2m_max or {})[i])..'°C',x,687,36,306,56,true)
+   text('降雨 '..value((d.precipitation_probability_max or {})[i],'%'),x,748,30,306,48)
+  end
+  R.rect(48,810,976,2,true)
+  text('接下来 6 小时',48,836,36,976,56,true)
+  local rows={};local now=os.date('%Y-%m-%dT%H:00')
+  for i,t in ipairs(h.time or {}) do if t>=now and #rows<6 then rows[#rows+1]=i end end
+  for n=1,6 do
+   local i=rows[n];local x=48+(n-1)*164
+   text(i and h.time[i]:sub(12,16) or '--',x,910,32,156,50)
+   text(value(i and (h.temperature_2m or {})[i])..'°',x,966,38,156,58,true)
+   text(i and wname((h.weather_code or {})[i]) or '--',x,1028,32,156,50)
+  end
+  R.compact('未来 7 天',48,1134,474,66,'weatherdays')
+  R.compact('逐小时',550,1134,474,66,function()hourpage=1;page='weatherhours';redraw=true end)
+  R.compact('更新天气',48,1218,474,66,weatherupdate)
+  R.compact('选择城市',550,1218,474,66,'cities')
+ elseif page=='weatherdays' then
+  R.begin(cfg.city.name..' · 未来 7 天',function()page='weather';redraw=true end)
+  R.text(weatherupdated(),48,158,30,976,48,'heavy')
+  R.text('日期',48,220,32,210,50,'heavy');R.text('天气',280,220,32,160,50,'heavy');R.text('最低 / 最高',480,220,32,295,50,'heavy');R.text('降雨概率',830,220,32,194,50,'heavy')
+  R.rect(48,266,976,3,true)
+  local d=weather.city==cfg.city.name and weather.data and weather.data.daily or {};local times=d.time or {}
+  if #times<2 then R.text('暂无多日预报，请点更新天气',48,365,34,976,110,'heavy') end
+  for i=1,math.min(7,#times) do local date=times[i];local y=288+(i-1)*116
+   local yy,mm,dd=date:match('^(%d+)%-(%d+)%-(%d+)$');local stamp=yy and os.time{year=yy,month=mm,day=dd,hour=12}
+   local label=date:sub(6):gsub('%-','/')..(stamp and (' 周'..weekday[tonumber(os.date('%w',stamp))+1]) or '')
+   R.text(label,48,y,34,215,54,'heavy');R.text(wname((d.weather_code or {})[i]),280,y,36,160,56,'heavy')
+   R.text(value((d.temperature_2m_min or {})[i])..' / '..value((d.temperature_2m_max or {})[i],'°C'),480,y,36,310,56,'heavy')
+   R.text(value((d.precipitation_probability_max or {})[i],'%'),840,y,36,184,56,'heavy')
+   R.text('最高风速 '..value((d.wind_speed_10m_max or {})[i],' km/h'),280,y+56,30,730,46,'heavy')
+   R.rect(48,y+109,976,2,true)
+  end
+  R.compact('逐小时',48,1140,474,66,function()hourpage=1;page='weatherhours';redraw=true end)
+  R.compact('更新天气',550,1140,474,66,weatherupdate)
+ elseif page=='weatherhours' then
+  R.begin(cfg.city.name..' · 逐小时',function()page='weather';redraw=true end)
+  R.text(weatherupdated(),48,158,30,976,48,'heavy')
+  R.text('时间',48,220,32,235,50,'heavy');R.text('温度',320,220,32,185,50,'heavy');R.text('天气',550,220,32,180,50,'heavy');R.text('降雨概率',830,220,32,194,50,'heavy')
+  R.rect(48,266,976,3,true)
+  local h=weather.city==cfg.city.name and weather.data and weather.data.hourly or {};local rows={};local now=os.date('%Y-%m-%dT%H:00')
+  for i,t in ipairs(h.time or {}) do if t>=now and #rows<48 then rows[#rows+1]=i end end
+  local pages=math.max(1,math.ceil(#rows/7));hourpage=math.min(hourpage,pages);local first=(hourpage-1)*7+1
+  if #rows==0 then R.text('暂无小时预报，请点更新天气',48,365,34,976,110,'heavy') end
+  for n=first,math.min(first+6,#rows) do local i=rows[n];local y=284+(n-first)*108
+   R.text(h.time[i]:sub(6):gsub('T',' '),48,y,34,235,54,'heavy')
+   R.text(value((h.temperature_2m or {})[i],'°C'),320,y,40,185,60,'heavy')
+   R.text(wname((h.weather_code or {})[i]),550,y,36,200,56,'heavy')
+   R.text(value((h.precipitation_probability or {})[i],'%'),840,y,36,184,56,'heavy')
+   R.text('风速 '..value((h.wind_speed_10m or {})[i],' km/h'),320,y+56,30,700,46,'heavy')
+   R.rect(48,y+102,976,2,true)
+  end
+  R.text('第 '..hourpage..' / '..pages..' 页  ·  未来 48 小时',48,1080,32,976,50,'heavy')
+  R.compact('上一页',48,1140,220,66,function()hourpage=math.max(1,hourpage-1);redraw=true end)
+  R.compact('下一页',284,1140,220,66,function()hourpage=math.min(pages,hourpage+1);redraw=true end)
+  R.compact('7 天天气',520,1140,220,66,'weatherdays');R.compact('更新',756,1140,268,66,weatherupdate)
+ elseif page=='rss' then
+  R.begin('热点榜',nav,true)
+  for i,board in ipairs({{'综合','all'},{'虎嗅','huxiu'},{'澎湃','thepaper'}}) do
+   R.compact(board[1],48+(i-1)*332,116,312,62,function()hotBoard=board[2];listpage=1;redraw=true end)
+   if hotBoard==board[2] then R.rect(66+(i-1)*332,169,276,4,true) end
+  end
+  local items=N.items(rss,hotBoard);local pages=math.max(1,math.ceil(#items/6))
+  listpage=math.max(1,math.min(listpage,pages));local first=(listpage-1)*6+1
+  R.text((rss.time and ('更新 '..os.date('%H:%M',rss.time)..' · ') or '')..#items..' 条 · 第 '..listpage..' / '..pages..' 页',48,195,28,976,44,'bold')
+  if #items==0 then R.text('暂无热点，点击更新',48,260,36,976,70,'bold') end
+  for i=first,math.min(first+5,#items) do
+   local item=items[i];local y=250+(i-first)*145
+   R.text(item.rank and string.format('%02d',item.rank) or '—',48,y,42,72,70,'bold')
+   R.text(U.short(item.title,46),132,y,36,892,88,'bold')
+   R.text((item.source or '')..(item.period and (' · '..item.period) or ''),132,y+90,28,892,40,'bold')
+   R.rect(48,y+137,976,2,true)
+   R.hitbox(48,y-3,976,142,function()openArticle(item)end)
+  end
+  R.compact('上一页',48,1208,220,66,function()listpage=math.max(1,listpage-1);redraw=true end)
+  R.compact('下一页',284,1208,220,66,function()listpage=math.min(pages,listpage+1);redraw=true end)
+  R.compact('更新',520,1208,220,66,function()network('hotspots')end)
+  R.compact('首页',756,1208,268,66,'home')
+  R.text('每 10 分钟更新 · 首页每 3 分钟轮换',48,1310,28,976,50,'bold')
+ elseif page=='hotdetail' then
+  R.begin('热点详情',function()page='rss';redraw=true end,true)
+  R.text(N.label(selected),48,139,30,976,60,'bold')
+  R.text(selected.title,48,230,40,976,210,'bold')
+  R.text('热榜摘要',48,490,32,976,60,'bold')
+  R.text(selected.body~='' and selected.body or '该话题暂未提供摘要。',48,560,36,976,580,'bold')
+  R.button('返回热点榜',48,1210,976,76,function()page='rss';redraw=true end)
+  R.compact('首页',756,1310,268,66,'home')
+ elseif page=='preparearticle' then
+  R.begin('阅读热点',function()page='rss';redraw=true end)
+  R.text(U.short(selected.title,60),48,190,38,976,210)
+  R.text(articleError~='' and articleError or '正在准备正文…',48,520,38,976,150)
+  if articleError~='' then R.button('重试',48,870,976,110,function()openArticle(selected)end) end
+  R.button('返回热点榜',48,1040,976,110,function()page='rss';redraw=true end)
+  R.compact('返回首页',48,1190,976,76,'home')
+ elseif page=='todos' then
+  R.begin('待办',nav);local first=(listpage-1)*7+1
+  if #todos==0 then R.text('暂无待办',48,210,40,976,80) end
+  for i=first,math.min(first+6,#todos) do local task=todos[i];local y=165+(i-first)*140
+   R.button((task.done and '✓  ' or '□  ')..U.short(task.text,20),48,y,795,110,function()task.done=not task.done;U.save(U.root..'/todos.json',todos);redraw=true end)
+   R.button('删',868,y,156,110,function()table.remove(todos,i);U.save(U.root..'/todos.json',todos);redraw=true end)
+  end
+  R.button('上一页',48,1208,225,100,function()listpage=math.max(1,listpage-1);redraw=true end)
+  R.button('下一页',290,1208,225,100,function()listpage=math.min(math.max(1,math.ceil(#todos/7)),listpage+1);redraw=true end)
+  R.button('添加',532,1208,492,100,'addtodo')
+ elseif page=='addtodo' then
+  R.begin('添加待办',function()page='todos';redraw=true end)
+  for i,label in ipairs({'阅读','喝水','运动','学习','买东西','休息'}) do
+   R.button(label,48+((i-1)%2)*502,190+math.floor((i-1)/2)*155,474,120,function()todos[#todos+1]={text=label,done=false};U.save(U.root..'/todos.json',todos);page='todos';redraw=true end)
+  end
+  R.button('输入文字',48,760,976,115,function()input('todo')end)
+ elseif page=='settings' then
+  drawSettings()
+ elseif page=='cities' then
+  R.begin('选择城市',function()page='settings';redraw=true end)
+  for i,c in ipairs(cities) do R.button(c.name,48+((i-1)%2)*502,175+math.floor((i-1)/2)*172,474,135,function()cfg.city=c;savecfg();network();page='weather';redraw=true end) end
+  R.button('搜索其他城市',48,1080,976,115,function()input('city')end)
+ elseif page=='cityresults' then
+  R.begin('搜索结果',function()page='cities';redraw=true end)
+  for i,c in ipairs(cityresults) do R.button(U.short(c.name..' '..(c.admin1 or '')..' '..(c.country or ''),23),48,175+(i-1)*163,976,126,function()cfg.city={name=c.name,latitude=c.latitude,longitude=c.longitude};savecfg();network();page='weather';redraw=true end) end
+  if #cityresults==0 then R.text('暂无结果，请稍后返回再搜索',48,205,34,976,100) end
+ elseif page=='feeds' then
+  R.begin('RSS 订阅源',function()page='settings';redraw=true end)
+  local pages=math.max(1,math.ceil(#cfg.feeds/4));listpage=math.max(1,math.min(listpage,pages));local first=(listpage-1)*4+1
+  for i=first,math.min(first+3,#cfg.feeds) do local f=cfg.feeds[i];local y=180+(i-first)*220
+   R.text(U.short(f.name,20),48,y,38,780,60);R.text(U.short(f.url,48),48,y+70,24,780,75)
+   R.button('删除',846,y,178,110,function()table.remove(cfg.feeds,i);savecfg();redraw=true end)
+  end
+  R.text('第 '..listpage..' / '..pages..' 页  ·  '..#cfg.feeds..' 个订阅',48,1060,32,976,50)
+  R.compact('上一页',48,1140,474,66,function()listpage=math.max(1,listpage-1);redraw=true end)
+  R.compact('下一页',550,1140,474,66,function()listpage=math.min(pages,listpage+1);redraw=true end)
+  if #cfg.feeds<12 then R.button('添加订阅地址',48,1240,976,100,function()input('feed','https://')end) end
+ elseif page=='keyboard' then
+  local labels={todo='输入待办',city='输入城市名称',feed='输入 RSS 地址',market='搜索股票 / ETF'}
+  R.begin(labels[inputkind],function()page=inputkind=='todo' and 'addtodo' or inputkind=='city' and 'cities' or inputkind=='market' and 'marketadd' or 'feeds';redraw=true end)
+  R.text(inputtext(),48,195,35,976,240)
+  if keyboardPinyin then R.text('输入拼音，点选汉字',48,470,28,976,45,'medium') end
+  candidates(true)
+  local keys={'1234567890','qwertyuiop','asdfghjkl-','zxcvbnm._/','?:=&%+#@~;'}
+  for row,keyrow in ipairs(keys) do for col=1,#keyrow do local key=keyrow:sub(col,col)
+   R.button(key,48+(col-1)*98,610+(row-1)*108,94,98,function()if #draft<(inputkind=='market' and 160 or 1024) then draft=draft..(keyboardUpper and key:upper() or key);candidatePage=1 end;keyboardDirty=true end)
+  end end
+  R.button(keyboardLabel(),48,1170,220,100,function()if keyboardPinyin then keyboardPinyin=false;keyboardUpper=false elseif not keyboardUpper then keyboardUpper=true else keyboardPinyin=true;keyboardUpper=false end;candidatePage=1;keyboardCaseDirty=true;keyboardDirty=true end)
+  R.button('空格',284,1170,220,100,function()if keyboardPinyin then local next=P.commit(draft);draft=next~=draft and next or draft..' ' else draft=draft..' ' end;candidatePage=1;keyboardDirty=true end)
+  R.button('退格',520,1170,220,100,function()local a=U.utf8(draft);a[#a]=nil;draft=table.concat(a);candidatePage=1;keyboardDirty=true end)
+  R.button(inputkind=='market' and '搜索' or '保存',756,1170,268,100,function()
+   if keyboardPinyin then draft=P.commit(draft) end
+   if draft:match('^%s*$') then notice='请先输入内容';keyboardDirty=true;return end
+   if inputkind=='todo' then todos[#todos+1]={text=draft,done=false};U.save(U.root..'/todos.json',todos);page='todos'
+   elseif inputkind=='feed' then if #cfg.feeds>=12 then notice='最多添加 12 个订阅源';redraw=true;return end;if not U.validurl(draft) then notice='请输入完整 http 或 https 地址';redraw=true;return end;cfg.feeds[#cfg.feeds+1]={name='订阅 '..(#cfg.feeds+1),url=draft};savecfg();network();page='feeds';listpage=math.ceil(#cfg.feeds/4)
+   elseif inputkind=='market' then searchstocks(draft)
+   else os.remove(U.root..'/cache/cities.json');lastCities='';network('search',draft);page='cityresults';cityresults={} end
+   notice='';redraw=true
+  end)
+ end
+ footer();R.finish(full);homeClockDirty=false;redraw=false;full=false;keyboardDirty=false;keyboardCaseDirty=false;if page=='keyboard' then keyboardNotice=notice end
+end
+local function action(a)
+ if not a then return end
+ if monotonic()>=nextActivity then U.exec('lipc-set-prop com.lab126.powerd touchScreenSaverTimeout 1 >/dev/null 2>&1');nextActivity=monotonic()+2 end
+ notice='';local oldpage=page
+ if type(a)=='function' then a()
+ elseif a=='reader' or a=='bookstore' or a=='browser' or a=='native' then quit(a)
+ elseif a=='refresh' then R.forceFull=true;redraw=true;full=true
+ elseif a=='update' then network()
+ else page=a;listpage=1;redraw=true end
+ if page~=oldpage then full=true end
+end
+os.remove('/tmp/mydash-v2.stop')
+U.write('/tmp/mydash-v2.pid',tostring(ffi.C.getpid()));readcache()
+nextNetwork=math.min(tonumber(status.time) or 0,os.time())+math.max(30,tonumber(cfg.refresh_minutes) or 60)*60
+nextHot=math.min(tonumber(rss.time) or 0,os.time())+600
+nextMarket=math.min(tonumber(marketcache.time) or 0,os.time())+math.max(5,tonumber(marketcfg.interval) or 5)*60
+if U.read('/tmp/mydash-v2-resume')=='rss' then
+ os.remove('/tmp/mydash-v2-resume');page='rss'
+ local resume=U.load(U.root..'/cache/reader-resume.json',{})
+ hotBoard=(resume.board=='huxiu' or resume.board=='thepaper') and resume.board or 'all'
+ listpage=math.max(1,math.min(math.floor(tonumber(resume.listpage) or 1),math.max(1,math.ceil(#N.items(rss,hotBoard)/6))))
+end
+local function main()
+ if arg[1]=='--input-benchmark' then
+  page='keyboard';inputkind='market';draft='';notice='';full=true
+  local before=monotonic();draw();print(string.format('KEYBOARD_FULL %.4f s %d commands',monotonic()-before,R.last_command_count))
+  local total=0;local buttons=#R.buttons
+  for c in ('maotai12'):gmatch('.') do draft=draft..c;keyboardDirty=true;before=monotonic();drawInput();total=total+monotonic()-before;assert(#R.buttons==buttons) end
+  print(string.format('KEYBOARD_PARTIAL average %.4f s %d commands',total/8,R.last_command_count));page='home';draw();return
+ end
+ if arg[1]=='--render-test' then
+  readcache();notice='';selected={title='热点排版测试',body=string.rep('南京的天气与今天的阅读。',12),link='https://example.com',source='百度热搜',rank=1}
+  marketcache=U.load(U.root..'/cache/markets.json',{quotes={}})
+  stockquery='maotai';stockresults={{symbol='sh600519',name='贵州茅台'}}
+  for _,name in ipairs({'home','calendar','weather','weatherdays','weatherhours','rss','hotdetail','preparearticle','todos','addtodo','settings','cities','cityresults','feeds','keyboard','markets','marketlist','marketadd','stockresults'}) do
+   page=name;inputkind='todo';draft='Read 20 pages';draw();print('RENDER_OK '..name)
+  end
+  page='keyboard';inputkind='market';draft='';draw();print('RENDER_OK empty stock keyboard')
+  page='home';draw();return
+ end
+ require('ffi/posix_h')
+ local inputWait=ffi.new('struct pollfd[1]')
+ acquire();local x,y=coordinates();local contact=false;local slot=0;local released=false;local lasttap=0
+ while running do
+  if U.read('/tmp/mydash-v2.stop') then quit('native');break end
+  local now=os.time()
+  if now>=nextPower then
+   local state=lipc('state');local active=state=='active' or state=='screenSaverPending';nextPower=now+2
+   if not active and not asleep then release();asleep=true
+   elseif active and asleep then acquire();asleep=false;x,y=coordinates();contact=false;released=false;R.forceFull=true;redraw=true;full=true end
+  end
+  if not asleep then
+   if os.date('%H:%M')~=lastMinute then
+    lastMinute=os.date('%H:%M')
+    if page=='home' or page=='calendar' then if os.date('%Y-%m-%d')~=lastHomeDate then redraw=true elseif page=='home' then homeClockDirty=true end end
+   end
+   if now>=nextNetwork then network();nextNetwork=now+math.max(30,tonumber(cfg.refresh_minutes) or 60)*60;nextHot=now+600
+   elseif now>=nextHot then network('hotspots');nextHot=now+600 end
+   if now>=nextMarket then marketupdate();nextMarket=now+math.max(5,tonumber(marketcfg.interval) or 5)*60 end
+   if now>=nextCache then
+   nextCache=now+1
+   local marketraw=U.read(U.root..'/cache/markets.json') or ''
+   if marketraw~='' and marketraw~=lastMarket then lastMarket=marketraw;marketcache=U.json.decode(marketraw) or {quotes={}};if page=='markets' then notice=(marketcache.errors and #marketcache.errors>0) and '部分品种更新失败，保留缓存' or '行情已更新';redraw=true elseif page=='home' then redraw=true end end
+   local marker=U.read(U.root..'/cache/status.json') or ''
+   if marker~=lastCache then lastCache=marker;readcache();if page~='keyboard' then notice=status.errors and status.errors[1] or '更新完成';redraw=true end end
+   if page=='cityresults' then local raw=U.read(U.root..'/cache/cities.json') or '';if raw~='' and raw~=lastCities then
+    lastCities=raw;local results=U.json.decode(raw) or {};cityresults=results.results or {};notice=results.error or (#cityresults==0 and '未找到城市，请换个名称重试' or '');redraw=true
+   end end
+   if page=='stockresults' and stockpending then
+    local result=U.load(U.root..'/cache/search-result.'..stockrequest..'.json',{})
+    if result.id==stockrequest then stockpending=false;stockresults=result.results or {};stockerror=result.error or '';redraw=true
+    elseif now-stockStarted>=18 then stockpending=false;stockerror='搜索超时，请修改后重试';redraw=true end
+   end
+   end
+   if page=='preparearticle' and articleError=='' then
+    local result=U.load(U.root..'/cache/article-result.'..articleRequest..'.json',{})
+    if result.id==articleRequest then
+     os.remove(U.root..'/cache/article-result.'..articleRequest..'.json')
+     if result.article_id and result.article_id:match('^%x+$') and #result.article_id==24 then launchArticle(result.article_id)
+     else articleError=result.error or '正文准备失败，请重试';redraw=true end
+    elseif now-articleStarted>=35 then articleError='准备超时，请返回列表后重试';redraw=true end
+   end
+   if page=='home' and N.advance(rss,now) then redraw=true end
+   if redraw then draw() elseif page=='keyboard' and keyboardDirty then drawInput()
+   elseif page=='home' and homeClockDirty then
+    R.partial();R.rect(48,128,475,160,false);R.text(os.date('%H:%M'),48,128,118,475,160,'bold')
+    R.rect(800,28,224,54,false);R.text('电量 '..battery(),800,28,34,224,54,'bold')
+    R.finish(false);homeClockDirty=false
+   end
+   local n=ffi.C.read(fd,ev,size)
+   if n==size then local e=ev[0]
+    if e.type==3 then
+     if e.code==47 then slot=tonumber(e.value)
+     elseif slot==0 then
+      if e.code==57 then if e.value>=0 then contact=true else if contact then released=true end;contact=false end
+      elseif e.code==53 then x=tonumber(e.value) elseif e.code==54 then y=tonumber(e.value) end
+     end
+    elseif e.type==0 and e.code==3 then x,y=coordinates();contact=false;released=false
+    elseif e.type==0 and e.code==0 and released then
+     released=false;local tap=monotonic();if x and y and tap-lasttap>=(page=='keyboard' and 0.05 or 0.18) then lasttap=tap;action(R.hit(x,y)) end
+    end
+   else
+    inputWait[0].fd=fd;inputWait[0].events=ffi.C.POLLIN
+    ffi.C.poll(inputWait,1,(page=='preparearticle' or stockpending) and 100 or 1000)
+   end
+  else ffi.C.usleep(200000) end
+ end
+end
+local ok,err=xpcall(main,debug.traceback)
+local nextAction=U.read(U.root..'/next_action')
+release(ok and (nextAction=='bookstore' or nextAction=='reader' or nextAction=='readarticle'))
+R.close();os.remove('/tmp/mydash-v2.pid');os.remove('/tmp/mydash-v2.stop')
+if not ok then io.stderr:write(err..'\n');os.exit(1) end
