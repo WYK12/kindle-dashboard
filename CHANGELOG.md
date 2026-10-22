@@ -1,34 +1,35 @@
-# Changelog
+# 更新日志
 
-## 2.53-list-spacing
+## 2.53-list-spacing — 2026-10-22
 
-- Increase spacing between homepage quote rows and separate the two timestamp lines in both orientations.
-- Give quote details and watchlist rows more room, with pagination controls below the list. Six items remain visible per page.
+- **首页行情**：拉开行情行距，调整品种、报价、涨跌与数据时间的对齐；日期和时间两行之间增加留白。
+- **行情详情**：增加报价、数据来源说明和分隔线之间的间距，避免文字贴线；翻页及更新按钮下移。
+- **自选管理**：增加列表行距与操作区域的留白，保留上移、下移和移除操作。
+- **横竖屏一致**：两种方向分别适配间距，保留原有字号与粗体，每页最多显示 6 个行情品种。
+- **验证**：通过本地语法、启动恢复和排版检查，以及 Kindle 原生字体下的横竖屏、有数据和空列表检查；实机确认行情详情、自选管理和返回首页可正常点按。
 
 ## 2.52-unified-direction — 2026-10-22
 
-- Follow dashboard direction in the managed KOReader library, search dialogs, books and articles, using native sticky-rotation queries without writing rotation-lock or per-book rotation preferences.
-- Map dashboard BlitBuffer rotation1 to KOReader counter-clockwise mode3, keeping their physical top-left corners aligned.
-- Use a wide pinyin search dialog and compact native keyboard in landscape so candidate/action rows remain visible; saved keyboard preferences remain unchanged.
-- Leave standalone KOReader sessions unchanged. Verify native framebuffer mapping, portrait/landscape selection, unmanaged isolation and saved preference preservation.
+- **书库与阅读统一方向**：从看板进入的 KOReader 书库、搜书、书籍和文章阅读跟随“设置 → 看板方向”。
+- **修复横屏朝向相反**：书库和阅读器与看板使用相同的实际朝向，切换页面后无需再转动设备。
+- **横屏搜书适配**：加宽拼音输入框，使用紧凑键盘，让候选词、取消、首页和搜索按钮完整显示。
+- **保留阅读设置**：方向锁定及紧凑键盘仅用于本次从看板启动的阅读器进程，不覆盖已保存的方向锁定、键盘或单本书方向偏好；独立启动 KOReader 保留原有行为。
+- **验证**：实机检查书库、搜书、EPUB 翻页、快捷返回与竖屏切换，恢复测试前的正文阅读位置；文章返回按钮通过原生字体离屏检查，未进行本轮文章或 PDF 的完整实机阅读测试。
 
 ## 2.51-landscape-pages — 2026-10-22
 
-- Apply the saved dashboard direction to every custom page: forecasts, quotes/watchlist, hotlists/details, calendar, tasks, settings, city/search results, feed management and keyboard.
-- Reflow wide pages with readable fonts, wider tables, two-column hotlists/settings and three-column preset grids. Preserve list page sizes, item order and return paths.
-- Position back buttons, notices, loading feedback and partial keyboard redraws using the active canvas geometry; direction switches take effect immediately in settings.
-- Stop text at complete lines when a box is full, avoiding clipped half-lines in long summaries.
-- Discard input queued before the first dashboard frame on startup/wake, preventing the outgoing library gesture from also activating a landscape footer action.
-- Keep KOReader library/reading direction independent; returning restores the dashboard direction.
-- Verify populated/empty pages in both orientations with native fonts, touch bounds, pagination, item reordering, calendar six-row months, keyboard typing/case changes and partial hotspot damage.
+- **看板各页横屏**：天气、7 天预报、逐小时天气、行情、自选管理、热点、日历、待办、设置、城市搜索及输入键盘统一跟随方向设置，切换立即生效。
+- **按横屏重新排版**：加宽行情和天气表格，热点与设置采用双栏，常用选项采用多列；列表页容量及原有返回路径保持一致。
+- **文字与操作区域适配**：返回按钮、提示、加载反馈和键盘局部刷新区域跟随屏幕尺寸；长文字只绘制完整行，避免露出半行字。
+- **减少切换误触**：首次画面绘制后丢弃切换期间排队的旧触摸事件，避免从书库返回后又误触底部入口。
+- **验证**：检查横竖屏有数据和空页面、触摸范围、翻页、自选排序、六行月份日历、键盘与局部刷新，并完成实机页面切换检查。
 
 ## 2.50-landscape-dashboard — 2026-10-22
 
-- Add a persisted homepage orientation setting; landscape lays out clock/weather above market quotes and publisher hotlists in two columns, with five bottom actions.
-- Rotate the dashboard canvas and raw touch mapping together without changing framebuffer/kernel or KOReader orientation; custom details remain portrait and home restores the selected orientation.
-- Map partial refresh rectangles to physical screen coordinates, retaining headline-only updates and the existing refresh schedule.
-- Pause the independent PW3 Juno status bar while the dashboard owns the screen, retain ownership through reader handoffs, and resume it on normal native exit.
-- Verify populated/empty native layouts, six quote rows, padded framebuffer stride, touch mapping, settings persistence, portrait details and live library/home returns.
+- **新增首页横屏**：时钟和天气位于上方，行情与热点左右排列，底部保留五个快捷按钮；方向选择可保存。
+- **旋转与点按同步**：看板画布、触摸坐标及局部刷新区域一同适配横屏，保留原有数据更新周期。
+- **原生状态栏处理**：看板运行时暂停独立的原生状态栏绘制，正常退出时恢复，避免时钟等原生元素覆盖看板。
+- **验证**：检查横竖屏有数据和空首页、6 行行情、触摸坐标、局部刷新及书库返回；后续版本继续扩展了详情页与阅读器横屏范围。
 
 ## 2.49-partial-hotspots — 2026-10-22
 
