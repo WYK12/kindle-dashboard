@@ -4,6 +4,10 @@
 STATE=${MYDASH_NATIVE_STATE:-/tmp/mydash-v2-native}
 mkdir -p "$STATE" || exit 1
 show_native() {
+ if [ -f "$STATE/statusbar" ]; then
+  killall -CONT JunoStatusBarDriver || return 1
+  rm -f "$STATE/statusbar"
+ fi
  if [ -f "$STATE/cvm" ]; then
   killall -CONT cvm || return 1
   rm -f "$STATE/cvm"
@@ -52,6 +56,11 @@ case "${1:-restore}" in
   if [ ! -f "$STATE/cvm" ] && killall -0 cvm 2>/dev/null; then
    : > "$STATE/cvm"
    killall -STOP cvm || exit 1
+  fi
+  # Newer PW3 firmware draws its clock independently of pillow and Java.
+  if killall -0 JunoStatusBarDriver 2>/dev/null; then
+   : > "$STATE/statusbar"
+   killall -STOP JunoStatusBarDriver || exit 1
   fi
   # Native dialogs leave a display-controller halftone mask outside /dev/fb0.
   # Clear it after pausing the WM, using the same API as its lightbox code.

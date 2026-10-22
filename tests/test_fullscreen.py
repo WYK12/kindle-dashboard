@@ -83,15 +83,21 @@ exit 0
         assert (tmp / 'state/native-touch').read_text() == '1'
         assert (tmp / 'state/volumd').exists()
         assert 'killall -STOP volumd' in calls
+        assert (tmp / 'state/statusbar').exists()
+        assert 'killall -STOP JunoStatusBarDriver' in calls
         before=calls.count('killall -STOP volumd')
+        status_before=calls.count('killall -STOP JunoStatusBarDriver')
         assert calls.index('killall -STOP awesome') < len(calls) - 1
         native('hide')
         assert (tmp / 'calls').read_text().splitlines().count('killall -STOP volumd')==before+1,'Hide must reassert USB protection across reader handoff'
+        assert (tmp / 'calls').read_text().splitlines().count('killall -STOP JunoStatusBarDriver')==status_before+1
         native('awake', '1')
         assert (tmp / 'value').read_text() == '1'
         native('awake', '1')
         native('show')
         assert not (tmp / 'state/volumd').exists()
+        assert not (tmp / 'state/statusbar').exists()
+        assert 'killall -CONT JunoStatusBarDriver' in (tmp / 'calls').read_text()
         assert 'killall -CONT volumd' in (tmp / 'calls').read_text()
         native('hide')
         native('restore')
@@ -294,6 +300,7 @@ ffi.cdef=function()end;ffi.new=function()return {[0]={}}end;ffi.sizeof=function(
 package.loaded.ffi=ffi;package.loaded.setupkoenv={}
 local function block(w,h)
  local b={}
+ b.getPhysicalRect=function(_,x,y,w,h)return x,y,w,h end
  b.getWidth=function()return w end;b.getHeight=function()return h end
  b.fill=function()end;b.paintRect=function()end;b.colorblitFrom=function()end
  b.viewport=function(_,_,_,vw,vh)return block(vw,vh)end

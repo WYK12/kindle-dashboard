@@ -9,6 +9,10 @@ function M.load(p,default) local s=M.read(p);if not s then return default end lo
 function M.save(p,t) return M.write(p,M.json.encode(t,{indent=true})) end
 function M.capture(cmd) local f=io.popen(cmd..' 2>/dev/null');if not f then return '' end local s=f:read('*a');f:close();return (s:gsub('%s+$','')) end
 function M.exec(cmd) return os.execute(cmd)==0 end
+function M.discard_input(fd,events,size)
+ local C=require('ffi').C
+ while C.read(fd,events,size)==size do end
+end
 function M.utf8(s) local a={};for c in tostring(s):gmatch('[%z\1-\127\194-\244][\128-\191]*') do a[#a+1]=c end return a end
 function M.short(s,n) local a=M.utf8(s);if #a<=n then return s end return table.concat(a,'',1,n-1)..'…' end
 function M.url(s) return (s:gsub('([^%w%-_%.~])',function(c)return string.format('%%%02X',c:byte())end)) end

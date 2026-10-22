@@ -1,5 +1,35 @@
 # Changelog
 
+## 2.53-list-spacing
+
+- Increase spacing between homepage quote rows and separate the two timestamp lines in both orientations.
+- Give quote details and watchlist rows more room, with pagination controls below the list. Six items remain visible per page.
+
+## 2.52-unified-direction — 2026-10-22
+
+- Follow dashboard direction in the managed KOReader library, search dialogs, books and articles, using native sticky-rotation queries without writing rotation-lock or per-book rotation preferences.
+- Map dashboard BlitBuffer rotation1 to KOReader counter-clockwise mode3, keeping their physical top-left corners aligned.
+- Use a wide pinyin search dialog and compact native keyboard in landscape so candidate/action rows remain visible; saved keyboard preferences remain unchanged.
+- Leave standalone KOReader sessions unchanged. Verify native framebuffer mapping, portrait/landscape selection, unmanaged isolation and saved preference preservation.
+
+## 2.51-landscape-pages — 2026-10-22
+
+- Apply the saved dashboard direction to every custom page: forecasts, quotes/watchlist, hotlists/details, calendar, tasks, settings, city/search results, feed management and keyboard.
+- Reflow wide pages with readable fonts, wider tables, two-column hotlists/settings and three-column preset grids. Preserve list page sizes, item order and return paths.
+- Position back buttons, notices, loading feedback and partial keyboard redraws using the active canvas geometry; direction switches take effect immediately in settings.
+- Stop text at complete lines when a box is full, avoiding clipped half-lines in long summaries.
+- Discard input queued before the first dashboard frame on startup/wake, preventing the outgoing library gesture from also activating a landscape footer action.
+- Keep KOReader library/reading direction independent; returning restores the dashboard direction.
+- Verify populated/empty pages in both orientations with native fonts, touch bounds, pagination, item reordering, calendar six-row months, keyboard typing/case changes and partial hotspot damage.
+
+## 2.50-landscape-dashboard — 2026-10-22
+
+- Add a persisted homepage orientation setting; landscape lays out clock/weather above market quotes and publisher hotlists in two columns, with five bottom actions.
+- Rotate the dashboard canvas and raw touch mapping together without changing framebuffer/kernel or KOReader orientation; custom details remain portrait and home restores the selected orientation.
+- Map partial refresh rectangles to physical screen coordinates, retaining headline-only updates and the existing refresh schedule.
+- Pause the independent PW3 Juno status bar while the dashboard owns the screen, retain ownership through reader handoffs, and resume it on normal native exit.
+- Verify populated/empty native layouts, six quote rows, padded framebuffer stride, touch mapping, settings persistence, portrait details and live library/home returns.
+
 ## 2.49-partial-hotspots — 2026-10-22
 
 - Remove the fixed ten-minute full-screen ghost-clearing flash while staying on a page; retain startup, manual and accumulated page-change clearing.

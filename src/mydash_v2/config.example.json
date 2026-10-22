@@ -6,5 +6,6 @@
   },
   "refresh_minutes": 30,
   "keep_awake": true,
-  "feeds": []
+  "feeds": [],
+  "dashboard_landscape": false
 }

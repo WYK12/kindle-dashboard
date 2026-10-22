@@ -15,6 +15,7 @@ function LetterInput:initKeyboard()
  self.keyboard=PlainKeyboard:new{keyboard_layer=self.input_type=='number' and 4 or 2,inputbox=self}
 end
 function I.show(options)
+ local screen=require('device').screen
  local dialog;local mode=true;local page=1;local busy=false;local last='';local lastLabels=''
  local function refresh(reset)
   if not dialog or not dialog.button_table then return end
@@ -66,6 +67,7 @@ function I.show(options)
   table.insert(actions,2,{text='首页',id='home',callback=function()UIManager:close(dialog);options.home()end})
  end
  dialog=InputDialog:new{
+  width=screen:getWidth()>screen:getHeight() and screen:getWidth()-screen:scaleBySize(36) or nil,
   title=options.title or '中文搜索',input=options.text or '',input_hint='书名或作者',inputtext_class=LetterInput,
   description='输入拼音后点候选汉字，确认书名再搜索。英文书名切换 English。',
   buttons={candidates,

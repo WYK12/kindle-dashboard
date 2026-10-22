@@ -1,6 +1,7 @@
 -- Real settings callbacks/fonts, with isolated power controls by default.
 assert(os.getenv('MYDASH_RENDER_OFFSCREEN')=='1')
 local U=require('util')
+local cfg=U.config();cfg.dashboard_landscape=false;U.config=function()return cfg end
 local read,execute,capture,osexecute=U.read,U.exec,U.capture,os.execute
 local lightfile='/sys/class/backlight/max77696-bl/brightness'
 local level,hardware=0,1

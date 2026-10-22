@@ -59,3 +59,23 @@ Run `device_refresh_ui.lua` on a configured device with `MYDASH_RENDER_OFFSCREEN
 ## Partial homepage refresh
 
 The host renderer checks cover no timer-only flashes, manual/page-change ghost clearing, hotspot-only damage bounds and current-article clicks. `device_partial_hotspots.lua` runs the same path offscreen with native device fonts and synthetic headlines, preserving live screen/input/settings. Use `MYDASH_RENDER_OFFSCREEN=1` and the normal dashboard `LUA_PATH`. It writes before/after PNGs to `/var/tmp/mydash-partial-{before,after}.png` for pixel comparisons outside the hotspot rectangle.
+
+## Landscape dashboard pages
+
+From the device's KOReader directory, run:
+
+```sh
+MYDASH_ROOT=/mnt/us/mydash_v2 \
+LUA_PATH='/mnt/us/mydash_v2/?.lua;/mnt/us/koreader/common/?.lua;;' \
+MYDASH_RENDER_OFFSCREEN=1 \
+MYDASH_HOME_FILE=/mnt/us/mydash_v2/home.lua \
+./luajit /path/to/tests/device_landscape.lua
+```
+
+This uses synthetic headlines/quotes and isolated settings, write and command callbacks. It checks populated and empty layouts in both orientations with native fonts, all text/touch bounds, raw physical touch mapping, six market rows, padded-stride rotated blits, immediate saved orientation toggles, page returns, six-row calendars, list pagination, watchlist reordering, partial keyboard typing/case changes, complete-line text clipping, pending-input draining with a real nonblocking pipe, current-article selection and physical hotspot refresh bounds. PNGs are written to `/var/tmp/mydash-landscape-{before,after,stride,empty}.png`; the before and stride images must be pixel-identical, and before/after differences must stay inside the logical hotspot rectangle `(976, 372, 424, 512)`. Per-page landscape previews are written to `/var/tmp/mydash-wide-*.png`. Live library/dashboard handoff and display quality need a separate device check. The standalone frontlight/calendar/hotspot checks explicitly use isolated portrait settings so they remain independent of the device’s saved direction.
+
+## Unified native reader direction
+
+Run `test_reader_direction.lua /path/to/2-mydash-direction.lua` with Lua/LuaJIT and `dkjson` on `LUA_PATH`. It checks managed portrait/landscape selection, native sticky-rotation queries, landscape keyboard compactness, saved preference preservation, malformed/missing config and standalone-reader isolation.
+
+On a device, set `MYDASH_TEST_NATIVE_ROTATION=1` and run from KOReader's directory (with its `common/` directory on `LUA_PATH`) to additionally check the actual framebuffer rotation against the dashboard's physical top-left. This uses an isolated buffer and does not rotate the live display. Library, keyboard, reading gestures and progress preservation need a live check.

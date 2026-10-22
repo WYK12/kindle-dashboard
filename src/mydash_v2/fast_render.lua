@@ -3,9 +3,10 @@ require('setupkoenv')
 local ffi=require('ffi')
 local BB=require('ffi/blitbuffer')
 local FT=require('ffi/freetype')
-local R={buttons={},lines={},frame_count=0,page_count=0,forceFull=false}
-local W,H,STRIDE=1072,1448,1088
-local buffer=BB.new(W,H,BB.TYPE_BB8)
+local R={buttons={},lines={},frame_count=0,page_count=0,forceFull=false,landscape=false,width=1072,height=1448}
+local PW,PH,STRIDE=1072,1448,1088
+local W,H=PW,PH
+local buffer=BB.new(PW,PH,BB.TYPE_BB8)
 buffer:fill(BB.COLOR_WHITE)
 local mapped,framebuffer,fbfd
 local faces,glyphs={},{}
@@ -13,6 +14,13 @@ local glyph_count=0
 local ts=ffi.new('struct timespec[1]')
 local function now()ffi.C.clock_gettime(1,ts);return tonumber(ts[0].tv_sec)+tonumber(ts[0].tv_nsec)/1e9 end
 local function screenY(y)return y end
+function R.setLandscape(enabled)
+ enabled=enabled==true;if R.landscape==enabled then return end
+ R.landscape=enabled;W,H=enabled and PH or PW,enabled and PW or PH
+ R.width,R.height=W,H;buffer:setRotation(enabled and 1 or 0)
+ if framebuffer then framebuffer:setRotation(enabled and 1 or 0) end
+ R.forceFull=true
+end
 local function touch(x,y,w,h)
  local d=R.damage
  if not d then R.damage={x=x,y=y,r=x+w,b=y+h}
@@ -23,9 +31,10 @@ local function mapScreen()
  local state=assert(U.read(U.root..'/fbink-state.txt'),'Missing display geometry')
  assert(state:find('screenWidth=1072;screenHeight=1448;',1,true) and state:find('BPP=8;lineLength=1088;',1,true),'Unsupported framebuffer layout')
  fbfd=ffi.C.open('/dev/fb0',2);assert(fbfd>=0,'Cannot open framebuffer')
- mapped=ffi.C.mmap(nil,STRIDE*H,3,1,fbfd,0)
+ mapped=ffi.C.mmap(nil,STRIDE*PH,3,1,fbfd,0)
  if mapped==ffi.cast('void*',-1) then ffi.C.close(fbfd);error('Cannot map framebuffer') end
- framebuffer=BB.new(W,H,BB.TYPE_BB8,mapped,STRIDE)
+ framebuffer=BB.new(PW,PH,BB.TYPE_BB8,mapped,STRIDE)
+ framebuffer:setRotation(R.landscape and 1 or 0)
 end
 local function faceFor(size)
  local key='b'..size
@@ -70,7 +79,7 @@ function R.text(s,x,y,size,w,h,weight)
   else
    local glyph=glyphFor(face,key,codepoint(c),weight=='heavy')
    if pen>0 and pen+glyph.ax>w then pen=0;baseline=baseline+face.height end
-   if baseline-face.ascender>=h then break end
+   if baseline-face.ascender+face.height>h then break end
    if glyph.bb:getWidth()>0 and glyph.bb:getHeight()>0 then
     view:colorblitFrom(glyph.bb,pen+glyph.l,baseline-glyph.t,0,0,glyph.bb:getWidth(),glyph.bb:getHeight(),BB.COLOR_BLACK)
    end
@@ -93,8 +102,8 @@ function R.begin(title,back,compact)
  R.lines={'#!/bin/sh','# Drawn in-process; this file is a page trace.'};R.buttons={};R.damage=nil;R.ops=0;R.started=now()
  buffer:paintRect(0,0,W,H,BB.COLOR_WHITE);touch(0,0,W,H)
  R.text(title,48,compact and 30 or 35,compact and 30 or 42,650,65,compact and 'medium' or nil)
- if back then if compact then R.compact('返回',866,20,158,58,back) else R.button('返回',846,24,178,85,back) end end
- R.rect(48,compact and 90 or 126,976,compact and 2 or 3,true)
+ if back then if compact then R.compact('返回',W-206,20,158,58,back) else R.button('返回',W-226,24,178,85,back) end end
+ R.rect(48,compact and 90 or 126,W-96,compact and 2 or 3,true)
 end
 function R.partial()
  R.lines={'#!/bin/sh','# Partial draw in-process.'}
@@ -113,19 +122,24 @@ function R.finish(full,region)
  area.left=math.max(0,area.left);area.top=math.max(0,area.top)
  area.width=math.min(W-area.left,area.width);area.height=math.min(H-area.top,area.height)
  if flash then area={left=0,top=0,width=W,height=H} end
+ local px,py,pw,ph=buffer:getPhysicalRect(area.left,area.top,area.width,area.height)
+ R.last_physical_area={left=px,top=py,width=pw,height=ph}
  if os.getenv('MYDASH_RENDER_OFFSCREEN')~='1' then
   mapScreen()
   framebuffer:blitFrom(buffer,area.left,area.top,area.left,area.top,area.width,area.height)
-  local command='/var/tmp/mydash-v2-fbink -q -W '..(flash and 'GC16 -f' or 'DU')..' -s top='..area.top..',left='..area.left..',width='..area.width..',height='..area.height
+  local command='/var/tmp/mydash-v2-fbink -q -W '..(flash and 'GC16 -f' or 'DU')..' -s top='..py..',left='..px..',width='..pw..',height='..ph
   assert(U.exec(command..' >>'..U.quote(U.root..'/render.log')..' 2>&1'),'Screen refresh failed')
  end
  R.last_command_count=R.ops;R.last_draw_seconds=painted-R.started;R.last_finish_seconds=now()-painted
  U.write('/var/tmp/mydash-v2-frame.sh',table.concat(R.lines,'\n')..'\n')
  U.write('/var/tmp/mydash-v2-perf.txt',string.format('draw=%.4f submit=%.4f operations=%d processes=1 flash=%s region=%dx%d\n',R.last_draw_seconds,R.last_finish_seconds,R.ops,tostring(flash),area.width,area.height))
 end
-function R.hit(x,y)for _,b in ipairs(R.buttons)do if x>=b.x and x<b.x+b.w and y>=b.y and y<b.y+b.h then return b.action end end end
+function R.hit(x,y)
+ if R.landscape then x,y=y,PW-x-1 end
+ for _,b in ipairs(R.buttons)do if x>=b.x and x<b.x+b.w and y>=b.y and y<b.y+b.h then return b.action end end
+end
 function R.close()
- if mapped then framebuffer=nil;ffi.C.munmap(mapped,STRIDE*H);ffi.C.close(fbfd);mapped=nil end
+ if mapped then framebuffer=nil;ffi.C.munmap(mapped,STRIDE*PH);ffi.C.close(fbfd);mapped=nil end
 end
 function R.snapshot(path)buffer:writePNG(path)end
 return R

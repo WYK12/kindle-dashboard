@@ -1,6 +1,7 @@
 -- Use native fonts/blitbuffers without drawing to the live screen or launching jobs.
 assert(os.getenv('MYDASH_RENDER_OFFSCREEN')=='1')
 local U=require('util');local load=U.load
+local cfg=U.config();cfg.dashboard_landscape=false;U.config=function()return cfg end
 local writes,saves={},{ }
 local items={
  {title=string.rep('用于检查两行热点文字清除的较长标题',4),source='虎嗅热文',board='huxiu',rank=1,content_kind='summary',link='https://example.com/first'},

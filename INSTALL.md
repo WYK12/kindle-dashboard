@@ -23,7 +23,7 @@
 - `koreader/koreader.sh`
 - `koreader/settings.reader.lua`、`koreader/history.lua`
 - `koreader/plugins/mydashbooks.koplugin/`、`mydashrss.koplugin/`（若存在）
-- `koreader/patches/2-mydash-bold-ui.lua`、`2-mydash-keep-awake.lua`（若存在）
+- `koreader/patches/2-mydash-bold-ui.lua`、`2-mydash-keep-awake.lua`、`2-mydash-direction.lua`（若存在）
 - `mydash_v2/` 和 `emergency.sh`（若已使用旧版看板）
 
 ## 3. 合并安装文件
@@ -37,7 +37,7 @@ Release 安装 ZIP 根目录包含 `mydash_v2/` 和 `koreader/`。将它们合�
 
 安装 ZIP 已生成这两个默认配置。升级已有安装时，保留自己的 `config.json`、`markets_config.json`、`todos.json` 与缓存，避免被示例配置覆盖。
 
-`koreader/koreader.sh` 是针对已验证版本的修改版，不适合直接覆盖未知版本。若你已有其他启动脚本改动，请先比较差异。两个字体/常显补丁也只应与已验证版本配合使用。
+`koreader/koreader.sh` 是针对已验证版本的修改版，不适合直接覆盖未知版本。若你已有其他启动脚本改动，请先比较差异。字体、常显和方向补丁也只应与已验证版本配合使用。
 
 ## 4. 首次启动
 
@@ -47,7 +47,7 @@ Release 安装 ZIP 根目录包含 `mydash_v2/` 和 `koreader/`。将它们合�
 nohup sh /mnt/us/mydash_v2/run.sh >/mnt/us/mydash_v2/launch.log 2>&1 </dev/null &
 ```
 
-首次启动没有联网缓存时，会先显示空数据并在后台获取。进入设置可修改城市、前光和首页常显；行情看板中可调整自选品种与顺序。将自己的书放入 `/mnt/us/Books/`，即可使用书库和继续阅读。
+首次启动没有联网缓存时，会先显示空数据并在后台获取。进入设置可修改城市、前光、首页常显和看板方向（横屏 / 竖屏）；行情看板中可调整自选品种与顺序。天气、行情、热点、日历、待办、设置和输入键盘均跟随看板方向，切换立即生效；从看板进入的 KOReader 书库、搜书、书籍和文章阅读也跟随同一方向；独立启动 KOReader 保留原有方向设置。旋转后页码和总页数会重新计算，正文位置由阅读器保存。将自己的书放入 `/mnt/us/Books/`，即可使用书库和继续阅读。
 
 ## 5. 开机自启
 
@@ -68,7 +68,7 @@ nohup sh /mnt/us/mydash_v2/run.sh >/mnt/us/mydash_v2/launch.log 2>&1 </dev/null 
 - 正常退出：看板设置 → 原生首页。
 - 停止首页：若已配置 SSH，执行 `sh /mnt/us/mydash_v2/stop.sh`。该命令只负责首页，不应拿它强制终止正在保存的阅读器。
 - 关闭自启：在 `mydash_v2/` 内创建 `DISABLE_AUTOSTART`，或在根目录创建 `MYDASH_SAFE_MODE`。
-- 恢复上游启动方式：退出看板和阅读器后，还原备份的 `koreader.sh`，移除本项目的两个插件和两个补丁。
+- 恢复上游启动方式：退出看板和阅读器后，还原备份的 `koreader.sh`，移除本项目的两个插件和三个补丁。
 - 移除看板：关闭自启并恢复 KOReader 后，删除 `mydash_v2/`。书籍目录 `Books/` 和文章目录 `RSS/` 是单独的数据目录，可按自己的需要保留。
 
 若画面停住，先确认后台是否仍有首页或阅读器进程。USB 存储模式中留下的墨水屏画面，并不代表界面进程还在运行。
