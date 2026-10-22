@@ -387,14 +387,14 @@ local function draw()
   if #marketcfg.watchlist==0 then R.text('还没有自选品种，点击下方“自选”添加',48,260,36,width,130) end
   for i=first,math.min(first+5,#marketcfg.watchlist) do
    local item=marketcfg.watchlist[i];local q=(marketcache.quotes or {})[item.symbol];local y=(wide and 224 or 232)+(i-first)*(wide and 108 or 144)
-   R.text(U.short((q and q.name) or item.name or item.symbol,wide and 12 or 11),48,y,34,wide and 470 or 350,56,'heavy')
-   R.text(q and string.format('%.2f',q.price) or '--',priceX,y-2,44,wide and 450 or 300,62,'heavy')
+   R.text(U.short((q and q.name) or item.name or item.symbol,wide and 12 or 11),48,y+4,34,wide and 470 or 350,56,'heavy')
+   R.text(q and string.format('%.2f',q.price) or '--',priceX,y+2,44,wide and 450 or 300,62,'heavy')
    local change=q and q.percent and string.format('%s %+.2f%%',q.percent>0 and '↑' or q.percent<0 and '↓' or '—',q.percent) or '--'
-   R.text(change,changeX,y+2,36,R.width-48-changeX,56,'heavy')
+   R.text(change,changeX,y+6,36,R.width-48-changeX,56,'heavy')
    local time=q and (q.quote_date and (q.quote_date..'（日期）') or (q.quote_at and os.date('%m-%d %H:%M',q.quote_at))) or '暂无报价'
    local detail=(q and q.unit or item.symbol)..'  ·  '..(q and q.source or '数据源')..'  ·  '..time..'  ·  '..M.state(q,now,marketcfg.interval)
    R.text(detail,48,y+(wide and 62 or 66),30,width,40,'heavy')
-   R.rect(48,y+(wide and 104 or 134),width,2,true)
+   R.rect(48,y+(wide and 98 or 134),width,2,true)
   end
   R.text('第 '..marketpage..' / '..pages..' 页  ·  '..#marketcfg.watchlist..' 个自选',48,wide and 884 or 1090,32,wide and 620 or width,42,'heavy')
   local by=wide and 936 or 1150;local gap=wide and 344 or 236;local bw=wide and 320 or 220
