@@ -1,5 +1,6 @@
 #!/bin/sh
 BASE=/mnt/us/mydash_v2
+if [ "${1:-update}" != search ]; then exec sh "$BASE/refresh.sh" "${1:-update}"; fi
 LOCK=/tmp/mydash-v2-network
 mkdir "$LOCK" 2>/dev/null || exit 0
 echo $$ > "$LOCK/pid"

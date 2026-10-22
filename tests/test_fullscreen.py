@@ -305,15 +305,15 @@ package.loaded['ffi/freetype']={newFaceSize=function(_,size)
  return {getHeightAndAscender=function()return math.ceil(size*1.5),math.ceil(size*1.2)end,
  renderGlyph=function(_,code)return {ax=math.ceil(size*(code<128 and .6 or 1)),l=0,t=size,bb=block(1,size)}end}
 end}
-local R=require('render');local frames={};local ops={};local settings;local rssButtons;local homeDraw,homeNews
+local R=require('render');local frames={};local ops={};local settings;local rssButtons;local homeDraw,homeNews,hotDraw
 local text,rect,begin,finish=R.text,R.rect,R.begin,R.finish
 R.text=function(s,x,y,size,w,h,weight)ops[#ops+1]={kind='text',s=s,x=x,y=y,size=size,w=w,h=h,weight=weight};return text(s,x,y,size,w,h,weight)end
 R.rect=function(x,y,w,h,black)ops[#ops+1]={kind='rect',x=x,y=y,w=w,h=h,black=black};return rect(x,y,w,h,black)end
 R.begin=function(...)ops={};return begin(...)end
 R.finish=function(full,region)
  finish(full,region)
- if R.page_title=='' then
-  homeDraw=debug.getinfo(2,'f').func
+ if R.page_title=='' and not region then
+  homeDraw=debug.getinfo(2,'f').func;hotDraw=R.drawHotspot
   for i=1,100 do local name,value=debug.getupvalue(homeDraw,i);if not name then break end;if name=='rss' then homeNews=value end end
  end
  if full or #ops>0 then frames[#frames+1]={title=R.page_title,ops=ops} end
@@ -324,6 +324,13 @@ end
 R.begin('',nil,true);assert(R.damage.y==0 and R.damage.b==1448)
 R.hitbox(0,0,100,50,'top');assert(R.hit(10,10)=='top' and R.hit(10,80)==nil)
 R.finish(true);assert(writes['/var/tmp/mydash-v2-perf.txt']:find('region=1072x1448',1,true))
+R.last_flash=-10000;R.partial();R.rect(48,128,475,160,false);R.finish(false)
+assert(writes['/var/tmp/mydash-v2-perf.txt']:find('flash=false',1,true),'Elapsed time alone must never force a full-screen flash')
+assert(writes['/var/tmp/mydash-v2-perf.txt']:find('region=475x160',1,true))
+R.forceFull=true;R.partial();R.rect(48,128,475,160,false);R.finish(false)
+assert(writes['/var/tmp/mydash-v2-perf.txt']:find('flash=true',1,true),'Manual ghost clearing must still flash')
+R.page_count=7;R.begin('切页');R.finish(true)
+assert(writes['/var/tmp/mydash-v2-perf.txt']:find('flash=true',1,true),'Page-change ghost clearing must remain available')
 frames={};arg={'--render-test'};dofile(APP..'/home.lua')
 local nativeShows=0
 for _,command in ipairs(calls)do if command:find("'show'",1,true) then nativeShows=nativeShows+1 end end
@@ -347,7 +354,11 @@ assert(calls[#calls-2]:find("'awake' '0'",1,true))
 local f=assert(io.open(OUTPUT,'w'));f:write(J.encode(frames));f:close()
 if not EMPTY then
  local N=require('news');assert(homeNews and homeDraw)
- assert(not N.advance(homeNews,1000));assert(N.advance(homeNews,1180));homeDraw()
+ local buttons=#R.buttons;local bookButton=R.hit(144,1380)
+ assert(not N.advance(homeNews,1000));assert(N.advance(homeNews,1180));assert(hotDraw);ops={};hotDraw(true)
+ assert(#R.buttons==buttons and R.hit(144,1380)==bookButton,'Partial hotspots must preserve the existing home buttons')
+ assert(writes['/var/tmp/mydash-v2-perf.txt']:find('region=976x186',1,true) and writes['/var/tmp/mydash-v2-perf.txt']:find('flash=false',1,true))
+ for _,op in ipairs(ops)do assert(op.y>=1072 and op.y+op.h<=1258,'Hotspot rotation must not redraw clock, quotes, separators or footer')end
  local found=false
  for _,op in ipairs(ops)do if op.kind=='text' and op.s=='第二来源的轮播资讯' then found=true end end
  assert(found,'Rotation must render the next title')

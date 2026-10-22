@@ -32,3 +32,30 @@ LUA_PATH='/mnt/us/mydash_v2/?.lua;/mnt/us/koreader/common/?.lua;;' \
 The input check tests the actual kernel wait with a pipe, without injecting touchscreen events. The keep-awake check substitutes power operations and uses the installed AutoSuspend implementation.
 
 Real-device verification is still needed for screen quality, touch routing, reader progress saving, USB replugging and model/firmware compatibility. Short CPU samples are not battery-life benchmarks.
+
+## Frontlight controls
+
+Render all pages with native device fonts and exercise the real settings callbacks using isolated brightness controls:
+
+```sh
+MYDASH_ROOT=/mnt/us/mydash_v2 \
+LUA_PATH='/mnt/us/mydash_v2/?.lua;/mnt/us/koreader/common/?.lua;;' \
+MYDASH_RENDER_OFFSCREEN=1 \
+./luajit /path/to/tests/device_frontlight.lua
+```
+
+This checks the stock minimum versus off, repeated off, increase/decrease, bounds and control/readback failures without changing live brightness or touching the screen. To additionally execute the real turn-off callback on a Paperwhite 3, set `MYDASH_TEST_LIGHT_OFF=1`; this deliberately leaves its frontlight off and writes an offscreen preview to `/var/tmp/mydash-frontlight-off.png`.
+
+## Persistent power queries
+
+Run `device_power_reads.lua` with the same `MYDASH_ROOT`, `LUA_PATH` and `MYDASH_RENDER_OFFSCREEN=1` settings as the frontlight check. It exercises typed reads, zero values, one reused connection, command fallback and clean close with isolated LIPC calls. It does not alter live power state.
+
+## Batched refresh
+
+With the dashboard on `LUA_PATH`, run `test_refresh.lua` for semantic comparisons, shared timing, due-only requests, persisted failure backoff, manual retries and recovery. It replaces data/network operations and does not download content.
+
+Run `device_refresh_ui.lua` on a configured device with `MYDASH_RENDER_OFFSCREEN=1` and `MYDASH_HOME_FILE=/mnt/us/mydash_v2/home.lua`. It uses copies of existing weather, market and hotspot caches, mocks writes/network calls, and checks actual cache-to-render decisions. Populated caches are required; it does not touch live input, network state or saved settings.
+
+## Partial homepage refresh
+
+The host renderer checks cover no timer-only flashes, manual/page-change ghost clearing, hotspot-only damage bounds and current-article clicks. `device_partial_hotspots.lua` runs the same path offscreen with native device fonts and synthetic headlines, preserving live screen/input/settings. Use `MYDASH_RENDER_OFFSCREEN=1` and the normal dashboard `LUA_PATH`. It writes before/after PNGs to `/var/tmp/mydash-partial-{before,after}.png` for pixel comparisons outside the hotspot rectangle.

@@ -104,7 +104,7 @@ end
 function R.finish(full,region)
  local painted=now();R.frame_count=R.frame_count+1
  if full then R.page_count=R.page_count+1 end
- local flash=R.forceFull or R.frame_count==1 or (full and R.page_count>=8) or (R.last_flash and painted-R.last_flash>=600)
+ local flash=R.forceFull or R.frame_count==1 or (full and R.page_count>=8)
  if flash then R.page_count=0;R.last_flash=painted end
  R.forceFull=false
  local d=R.damage

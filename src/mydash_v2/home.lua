@@ -1,5 +1,5 @@
 local P=require('pinyin')
-local U=require('util');local R=require('render');local ffi=require('ffi');local M=require('markets');local A=require('article');local N=require('news');local C=require('calendar');local L=require('reading')
+local U=require('util');local R=require('render');local ffi=require('ffi');local M=require('markets');local A=require('article');local N=require('news');local C=require('calendar');local L=require('reading');local F=require('refresh')
 ffi.cdef[[
 struct input_event { long sec; long usec; unsigned short type; unsigned short code; int value; };
 int open(const char*,int,...); int read(int,void*,unsigned int); int close(int);
@@ -12,10 +12,11 @@ local todos=U.load(U.root..'/todos.json',{});local rss={items={}};local weather=
 local notice='';local listpage=1;local selected=nil;local draft='';local inputkind='';local keyboardUpper=false
 local articleRequest='';local articleStarted=0;local articleError=''
 local hourpage=1
-local hotBoard='all';local nextHot=0
+local hotBoard='all'
 local keyboardPinyin=false;local candidatePage=1;local homeClockDirty=false;local lastHomeDate=''
-local cityresults={};local lastCities='';local lastMinute='';local asleep=false;local nextPower=0;local nextNetwork=0;local lastCache='';local redraw=true;local full=true
-local marketcfg=M.config();local marketcache=U.load(U.root..'/cache/markets.json',{quotes={}});local nextMarket=0;local lastMarket='';local marketpage=1
+local cityresults={};local lastCities='';local lastMinute='';local asleep=false;local nextPower=0;local nextRefresh=0;local lastCache='';local redraw=true;local full=true
+local marketcfg=M.config();local marketcache=U.load(U.root..'/cache/markets.json',{quotes={}});local lastMarket='';local marketpage=1
+local refreshstate;local lastRefresh='';local manualPending=false
 local keyboardDirty=false;local keyboardCaseDirty=false;local keyboardNotice='';local nextActivity=0;local nextCache=0
 local stockquery='';local stockresults={};local stockrequest='';local stockpending=false;local stockStarted=0;local stockresultpage=1;local stockerror=''
 local ev=ffi.new('struct input_event[1]');local size=ffi.sizeof(ev[0]);assert(size==16,'仅支持 ARMv7 32 位 input_event')
@@ -24,14 +25,50 @@ local function monotonic() ffi.C.clock_gettime(1,ts);return tonumber(ts[0].tv_se
 local weekday={'日','一','二','三','四','五','六'}
 local cities={{name='南京',latitude=32.06,longitude=118.79},{name='北京',latitude=39.90,longitude=116.41},{name='上海',latitude=31.23,longitude=121.47},{name='杭州',latitude=30.27,longitude=120.15},{name='苏州',latitude=31.30,longitude=120.58},{name='广州',latitude=23.13,longitude=113.26},{name='深圳',latitude=22.54,longitude=114.06},{name='成都',latitude=30.57,longitude=104.07},{name='武汉',latitude=30.59,longitude=114.31},{name='香港',latitude=22.32,longitude=114.17}}
 local function readcache()
- weather=U.load(U.root..'/cache/weather.json',{});rss=N.replace(rss,U.load(U.root..'/cache/hotspots.json',{items={}}));status=U.load(U.root..'/cache/status.json',{})
+ local nextWeather=U.load(U.root..'/cache/weather.json',{});local nextRSS=U.load(U.root..'/cache/hotspots.json',{items={}})
+ local weatherChanged=not F.same('weather',weather,nextWeather);local newsChanged=not F.same('hotspots',rss,nextRSS)
+ weather=nextWeather;rss=N.replace(rss,nextRSS);status=U.load(U.root..'/cache/status.json',{})
+ return weatherChanged,newsChanged
 end
-local function lipc(prop) return U.capture('lipc-get-prop com.lab126.powerd '..prop) end
+local function schedule(now)
+ refreshstate=F.state(U.load(U.root..'/cache/refresh-state.json',{}),F.periods(cfg,marketcfg),{weather=weather.time,hotspots=rss.time,markets=marketcache.time},now)
+ nextRefresh=F.next(refreshstate)
+end
+local powerd
+do
+ local ok,lib=pcall(require,'liblipclua')
+ if ok then local opened,handle=pcall(lib.init,'com.wyk12.mydash.power');if opened then powerd=handle end end
+end
+local function lipc(prop)
+ if powerd then
+  local ok,value=pcall(function()
+   if prop=='state' then return powerd:get_string_property('com.lab126.powerd',prop) end
+   return powerd:get_int_property('com.lab126.powerd',prop)
+  end)
+  if ok and value~=nil then return tostring(value) end
+ end
+ return U.capture('lipc-get-prop com.lab126.powerd '..prop)
+end
+local lightfile='/sys/class/backlight/max77696-bl/brightness'
+local function setlight(level)
+ local ok=U.exec('lipc-set-prop com.lab126.powerd flIntensity '..level)
+ if ok and level==0 then
+  -- Like KOReader on PW3: the stock zero step still leaves the LEDs on.
+  ok=U.exec("printf '0\\n' > "..U.quote(lightfile)) and tonumber(U.read(lightfile))==0
+ end
+ notice=ok and (level==0 and '背光已关闭' or '') or '亮度设置失败，请重试'
+ redraw=true
+end
 local function network(mode,text)
- local command='/bin/sh '..U.quote(U.root..'/fetch.sh')..' '..U.quote(mode or 'update')..' '..U.quote(text or '')..' >/dev/null 2>&1 &'
- os.execute(command);if page~='keyboard' then notice='正在后台更新';redraw=true end
+ local script=mode=='search' and '/fetch.sh' or '/refresh.sh'
+ local command='/bin/sh '..U.quote(U.root..script)..' '..U.quote(mode or 'update')..' '..U.quote(text or '')..' >/dev/null 2>&1 &'
+ os.execute(command)
+ if mode~='auto' then
+  manualPending=mode~='search'
+  if page~='keyboard' then notice='正在后台更新';redraw=true end
+ end
 end
-local function savecfg() assert(U.save(U.root..'/config.json',cfg));nextNetwork=0 end
+local function savecfg() assert(U.save(U.root..'/config.json',cfg));nextRefresh=0 end
 local function native(mode,value)
  return U.exec('/bin/sh '..U.quote(U.root..'/native_ui.sh')..' '..U.quote(mode)..' '..U.quote(value or '')..' >>'..U.quote(U.root..'/app.log')..' 2>&1')
 end
@@ -113,9 +150,9 @@ end
 local function nav() page='home';notice='';redraw=true;full=true end
 local function input(kind,value) inputkind=kind;draft=value or '';keyboardPinyin=kind~='feed';keyboardUpper=false;candidatePage=1;keyboardDirty=false;page='keyboard';redraw=true end
 local function marketupdate()
- os.execute('/bin/sh '..U.quote(U.root..'/market_fetch.sh')..' >/dev/null 2>&1 &');if page~='keyboard' then notice='正在更新行情';redraw=true end
+ network('markets')
 end
-local function savemarkets(orderOnly) assert(U.save(U.root..'/markets_config.json',marketcfg));if not orderOnly then nextMarket=0 end;redraw=true end
+local function savemarkets(orderOnly) assert(U.save(U.root..'/markets_config.json',marketcfg));if not orderOnly then network('markets') end;redraw=true end
 local function addmarket(symbol,name)
  for _,v in ipairs(marketcfg.watchlist) do if v.symbol==symbol then notice='已在自选中';return false end end
  if #marketcfg.watchlist>=12 then notice='最多添加 12 个品种';return false end
@@ -187,10 +224,12 @@ local function drawSettings()
    else notice='常显设置失败，请查看 app.log' end;redraw=true
   end)
   local light=tonumber(lipc('flIntensity')) or 0
-  R.text('前光',48,744,32,500,50)
-  R.text(tostring(light)..' / 24',650,746,28,374,48,'medium')
-  R.compact('减亮',48,822,474,66,function()U.exec('lipc-set-prop com.lab126.powerd flIntensity '..math.max(0,light-2));redraw=true end)
-  R.compact('增亮',550,822,474,66,function()U.exec('lipc-set-prop com.lab126.powerd flIntensity '..math.min(24,light+2));redraw=true end)
+  local lightstatus=tonumber(U.read(lightfile))==0 and '已关闭' or light==0 and '最低亮度' or (tostring(light)..' / 24')
+  R.text('背光',48,744,32,500,50)
+  R.text(lightstatus,650,746,28,374,48,'medium')
+  R.compact('减亮',48,822,308,66,function()setlight(math.max(0,light-2))end)
+  R.compact('增亮',382,822,308,66,function()setlight(math.min(24,light+2))end)
+  R.compact('关闭背光',716,822,308,66,function()setlight(0)end)
   R.rect(48,930,976,2,true)
   R.compact('清除残影',48,972,474,66,'refresh')
   R.compact('休眠',550,972,474,66,function()
@@ -200,6 +239,21 @@ local function drawSettings()
   end)
   R.compact('原生首页',48,1208,976,66,'native')
 
+end
+function R.drawHotspot(partial)
+ if partial then R.partial();R.rect(48,1072,976,186,false) end
+ local item=(rss.items or {})[rss.home_index or 1]
+ R.text('热点',48,1080,40,160,60,'bold')
+ if item then R.text('综合 · '..N.label(item),228,1084,32,640,54,'bold') end
+ R.text('全部',900,1084,34,124,54,'bold')
+ R.text(item and U.short(item.title,40) or '暂无热点，点击更新',48,1138,40,976,120,'bold')
+ if partial then R.finish(false,{left=48,top=1072,width=976,height=186})
+ else
+  R.hitbox(48,1072,976,66,'rss')
+  R.hitbox(48,1138,976,120,item and function()
+   local current=(rss.items or {})[rss.home_index or 1];if current then openArticle(current) end
+  end or 'rss')
+ end
 end
 local function draw()
  if page=='home' then
@@ -252,18 +306,7 @@ local function draw()
   if count==0 then text('添加自选',48,600,40,976,70,true) end
   R.hitbox(48,430,976,626,'markets')
   R.rect(48,1060,976,2,true)
-  local item=(rss.items or {})[rss.home_index or 1]
-  text('热点',48,1080,40,160,60,true)
-  if item then text('综合 · '..N.label(item),228,1084,32,640,54,true) end
-  text('全部',900,1084,34,124,54,true)
-  R.hitbox(48,1072,976,66,'rss')
-  if item then
-   text(U.short(item.title,40),48,1138,40,976,120,true)
-   R.hitbox(48,1138,976,120,function()openArticle(item)end)
-  else
-   text('暂无热点，点击更新',48,1138,40,976,120,true)
-   R.hitbox(48,1138,976,120,'rss')
-  end
+  R.drawHotspot(false)
   R.rect(48,1280,976,2,true)
 
  elseif page=='calendar' then
@@ -501,7 +544,7 @@ local function draw()
    notice='';redraw=true
   end)
  end
- footer();R.finish(full);homeClockDirty=false;redraw=false;full=false;keyboardDirty=false;keyboardCaseDirty=false;if page=='keyboard' then keyboardNotice=notice end
+ footer();R.finish(full);homeClockDirty=false;R.homeHotDirty=false;redraw=false;full=false;keyboardDirty=false;keyboardCaseDirty=false;if page=='keyboard' then keyboardNotice=notice end
 end
 local function action(a)
  if not a then return end
@@ -516,14 +559,52 @@ local function action(a)
 end
 os.remove('/tmp/mydash-v2.stop')
 U.write('/tmp/mydash-v2.pid',tostring(ffi.C.getpid()));readcache()
-nextNetwork=math.min(tonumber(status.time) or 0,os.time())+math.max(30,tonumber(cfg.refresh_minutes) or 60)*60
-nextHot=math.min(tonumber(rss.time) or 0,os.time())+600
-nextMarket=math.min(tonumber(marketcache.time) or 0,os.time())+math.max(5,tonumber(marketcfg.interval) or 5)*60
+lastMarket=U.read(U.root..'/cache/markets.json') or '';lastCache=U.read(U.root..'/cache/status.json') or '';lastRefresh=U.read(U.root..'/cache/refresh-state.json') or ''
+schedule(os.time())
 if U.read('/tmp/mydash-v2-resume')=='rss' then
  os.remove('/tmp/mydash-v2-resume');page='rss'
  local resume=U.load(U.root..'/cache/reader-resume.json',{})
  hotBoard=(resume.board=='huxiu' or resume.board=='thepaper') and resume.board or 'all'
  listpage=math.max(1,math.min(math.floor(tonumber(resume.listpage) or 1),math.max(1,math.ceil(#N.items(rss,hotBoard)/6))))
+end
+local function checkcache(now)
+ if not U.read('/tmp/mydash-v2-refresh/pid') then
+ local marketraw=U.read(U.root..'/cache/markets.json') or ''
+ if marketraw~='' and marketraw~=lastMarket then
+  local incoming=U.json.decode(marketraw)
+  if incoming then
+   local changed=not F.same('markets',marketcache,incoming)
+   if page=='markets' then for _,item in ipairs(marketcfg.watchlist)do
+    if M.state((marketcache.quotes or {})[item.symbol],now,marketcfg.interval)~=M.state((incoming.quotes or {})[item.symbol],now,marketcfg.interval) then changed=true end
+   end end
+   marketcache=incoming;if changed and (page=='home' or page=='markets') then redraw=true end
+  end
+  lastMarket=marketraw
+ end
+ local marker=U.read(U.root..'/cache/status.json') or ''
+ if marker~=lastCache then
+  lastCache=marker;local previousError=status.errors and status.errors[1];local weatherChanged,newsChanged=readcache()
+  if (weatherChanged and (page=='home' or page:match('^weather'))) or (newsChanged and (page=='home' or page=='rss')) then redraw=true end
+  if page~='keyboard' then
+   local oldNotice=notice;local problem=status.errors and status.errors[1]
+   if manualPending then notice=problem or '更新完成';redraw=true
+   elseif problem then notice=problem
+   elseif notice==previousError then notice='' end
+   if notice~=oldNotice then redraw=true end
+  end
+  manualPending=false
+ end
+ local updated=U.read(U.root..'/cache/refresh-state.json') or ''
+ if updated~=lastRefresh then lastRefresh=updated;schedule(now) end
+ end
+ if page=='cityresults' then local raw=U.read(U.root..'/cache/cities.json') or '';if raw~='' and raw~=lastCities then
+  lastCities=raw;local results=U.json.decode(raw) or {};cityresults=results.results or {};notice=results.error or (#cityresults==0 and '未找到城市，请换个名称重试' or '');redraw=true
+ end end
+ if page=='stockresults' and stockpending then
+  local result=U.load(U.root..'/cache/search-result.'..stockrequest..'.json',{})
+  if result.id==stockrequest then stockpending=false;stockresults=result.results or {};stockerror=result.error or '';redraw=true
+  elseif now-stockStarted>=18 then stockpending=false;stockerror='搜索超时，请修改后重试';redraw=true end
+ end
 end
 local function main()
  if arg[1]=='--input-benchmark' then
@@ -559,24 +640,8 @@ local function main()
     lastMinute=os.date('%H:%M')
     if page=='home' or page=='calendar' then if os.date('%Y-%m-%d')~=lastHomeDate then redraw=true elseif page=='home' then homeClockDirty=true end end
    end
-   if now>=nextNetwork then network();nextNetwork=now+math.max(30,tonumber(cfg.refresh_minutes) or 60)*60;nextHot=now+600
-   elseif now>=nextHot then network('hotspots');nextHot=now+600 end
-   if now>=nextMarket then marketupdate();nextMarket=now+math.max(5,tonumber(marketcfg.interval) or 5)*60 end
-   if now>=nextCache then
-   nextCache=now+1
-   local marketraw=U.read(U.root..'/cache/markets.json') or ''
-   if marketraw~='' and marketraw~=lastMarket then lastMarket=marketraw;marketcache=U.json.decode(marketraw) or {quotes={}};if page=='markets' then notice=(marketcache.errors and #marketcache.errors>0) and '部分品种更新失败，保留缓存' or '行情已更新';redraw=true elseif page=='home' then redraw=true end end
-   local marker=U.read(U.root..'/cache/status.json') or ''
-   if marker~=lastCache then lastCache=marker;readcache();if page~='keyboard' then notice=status.errors and status.errors[1] or '更新完成';redraw=true end end
-   if page=='cityresults' then local raw=U.read(U.root..'/cache/cities.json') or '';if raw~='' and raw~=lastCities then
-    lastCities=raw;local results=U.json.decode(raw) or {};cityresults=results.results or {};notice=results.error or (#cityresults==0 and '未找到城市，请换个名称重试' or '');redraw=true
-   end end
-   if page=='stockresults' and stockpending then
-    local result=U.load(U.root..'/cache/search-result.'..stockrequest..'.json',{})
-    if result.id==stockrequest then stockpending=false;stockresults=result.results or {};stockerror=result.error or '';redraw=true
-    elseif now-stockStarted>=18 then stockpending=false;stockerror='搜索超时，请修改后重试';redraw=true end
-   end
-   end
+   if now>=nextRefresh then network('auto');nextRefresh=now+300 end
+   if now>=nextCache then nextCache=now+1;checkcache(now) end
    if page=='preparearticle' and articleError=='' then
     local result=U.load(U.root..'/cache/article-result.'..articleRequest..'.json',{})
     if result.id==articleRequest then
@@ -585,12 +650,14 @@ local function main()
      else articleError=result.error or '正文准备失败，请重试';redraw=true end
     elseif now-articleStarted>=35 then articleError='准备超时，请返回列表后重试';redraw=true end
    end
-   if page=='home' and N.advance(rss,now) then redraw=true end
+   if page=='home' and N.advance(rss,now) then R.homeHotDirty=true end
    if redraw then draw() elseif page=='keyboard' and keyboardDirty then drawInput()
    elseif page=='home' and homeClockDirty then
     R.partial();R.rect(48,128,475,160,false);R.text(os.date('%H:%M'),48,128,118,475,160,'bold')
     R.rect(800,28,224,54,false);R.text('电量 '..battery(),800,28,34,224,54,'bold')
     R.finish(false);homeClockDirty=false
+   elseif page=='home' and R.homeHotDirty then
+    R.drawHotspot(true);R.homeHotDirty=false
    end
    local n=ffi.C.read(fd,ev,size)
    if n==size then local e=ev[0]
@@ -615,4 +682,5 @@ local ok,err=xpcall(main,debug.traceback)
 local nextAction=U.read(U.root..'/next_action')
 release(ok and (nextAction=='bookstore' or nextAction=='reader' or nextAction=='readarticle'))
 R.close();os.remove('/tmp/mydash-v2.pid');os.remove('/tmp/mydash-v2.stop')
+if powerd then pcall(function()powerd:close()end) end
 if not ok then io.stderr:write(err..'\n');os.exit(1) end
